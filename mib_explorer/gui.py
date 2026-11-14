@@ -215,6 +215,7 @@ class MibExplorerApp(tk.Tk):
             lines = [
                 definition.name,
                 f"Module: {definition.module}",
+                f"File: {definition.source_file or 'Unknown'}",
                 f"Numeric OID: {definition.oid_text}",
             ]
             if definition.kind:

@@ -134,6 +134,7 @@ def _module_definitions(
     module: str,
     source: str,
     raw_descriptions: dict[tuple[str, str], str],
+    source_files: dict[str, str],
 ) -> tuple[list[OidDefinition], list[str]]:
     definitions: list[OidDefinition] = []
     warnings: list[str] = []
@@ -166,6 +167,7 @@ def _module_definitions(
                 access=str(entry.get("maxaccess") or entry.get("access") or ""),
                 status=_display_value(entry.get("status")),
                 description=description,
+                source_file=source_files.get(module, ""),
             )
         )
 
@@ -225,10 +227,16 @@ def load_mibs(paths: Iterable[str | Path]) -> ParseResult:
             suffix = f": {detail}" if detail else ""
             warnings.append(f"{module}: {status_text}{suffix}")
 
+    source_files = {
+        module: Path(str(status.file)).name
+        for module, status in statuses.items()
+        if getattr(status, "file", None)
+    }
+
     definitions: list[OidDefinition] = []
     for module, document in sorted(generated.items()):
         module_records, module_warnings = _module_definitions(
-            module, document, description_parser.raw_descriptions
+            module, document, description_parser.raw_descriptions, source_files
         )
         definitions.extend(module_records)
         warnings.extend(module_warnings)

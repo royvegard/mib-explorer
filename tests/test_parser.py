@@ -17,6 +17,7 @@ class MibParserTests(unittest.TestCase):
         scalar = definitions[("TEST-MIB", "testScalar")]
         self.assertEqual(scalar.oid, (1, 3, 6, 1, 4, 1, 55555, 1, 1))
         self.assertEqual(scalar.syntax, "INTEGER")
+        self.assertEqual(scalar.source_file, "TEST-MIB.mib")
         self.assertEqual(
             scalar.description,
             "A sample scalar for parser tests.\n"
