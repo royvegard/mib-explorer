@@ -14,7 +14,7 @@ from .parser import ParseResult, load_mibs
 
 
 class MibExplorerApp(tk.Tk):
-    def __init__(self) -> None:
+    def __init__(self, startup_paths: Sequence[str | Path] = ()) -> None:
         super().__init__()
         self.title("MIB Explorer")
         self.geometry("1120x720")
@@ -32,6 +32,8 @@ class MibExplorerApp(tk.Tk):
 
         self._build_widgets()
         self.after(100, self._poll_results)
+        if startup_paths:
+            self._start_loading(startup_paths)
 
     def _build_widgets(self) -> None:
         self.columnconfigure(0, weight=1)
@@ -295,5 +297,5 @@ class MibExplorerApp(tk.Tk):
         widget.configure(state="disabled")
 
 
-def main() -> None:
-    MibExplorerApp().mainloop()
+def main(startup_paths: Sequence[str | Path] = ()) -> None:
+    MibExplorerApp(startup_paths=startup_paths).mainloop()
