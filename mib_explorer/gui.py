@@ -16,6 +16,13 @@ from .model import OidDefinition, OidNode, build_oid_tree
 from .parser import ParseResult, load_mibs
 
 
+def _single_child_chain(node: OidNode) -> tuple[OidNode, ...]:
+    chain = [node]
+    while len(chain[-1].children) == 1:
+        chain.append(next(iter(chain[-1].children.values())))
+    return tuple(chain)
+
+
 class MibExplorerApp(tk.Tk):
     def __init__(self, startup_paths: Sequence[str | Path] = ()) -> None:
         super().__init__()
@@ -28,6 +35,7 @@ class MibExplorerApp(tk.Tk):
         self._nodes_by_oid: dict[tuple[int, ...], OidNode] = {}
         self._iid_by_oid: dict[tuple[int, ...], str] = {}
         self._oid_by_iid: dict[str, tuple[int, ...]] = {}
+        self._definitions_by_iid: dict[str, tuple[OidDefinition, ...]] = {}
         self._search_matches: list[tuple[int, ...]] = []
         self._search_index = 0
         self._loading = False
@@ -194,23 +202,50 @@ class MibExplorerApp(tk.Tk):
         self._nodes_by_oid.clear()
         self._iid_by_oid.clear()
         self._oid_by_iid.clear()
+        self._definitions_by_iid.clear()
         root = build_oid_tree(self._definitions.values())
 
+        root_iid = self._tree.insert(
+            "",
+            "end",
+            text=root.label,
+            values=(root.oid_text, root.kind, root.syntax),
+            open=True,
+        )
+        self._nodes_by_oid[root.oid] = root
+        self._iid_by_oid[root.oid] = root_iid
+        self._oid_by_iid[root_iid] = root.oid
+        self._definitions_by_iid[root_iid] = ()
+
         def insert(parent_iid: str, node: OidNode) -> None:
+            chain = _single_child_chain(node)
+            endpoint = chain[-1]
+            definitions = tuple(
+                definition for chain_node in chain for definition in chain_node.definitions
+            )
+            kinds = sorted({definition.kind for definition in definitions if definition.kind})
+            syntaxes = sorted({definition.syntax for definition in definitions if definition.syntax})
             iid = self._tree.insert(
                 parent_iid,
                 "end",
-                text=node.label,
-                values=(node.oid_text, node.kind, node.syntax),
-                open=(not node.oid),
+                text=".".join(chain_node.label for chain_node in chain),
+                values=(
+                    endpoint.oid_text,
+                    ", ".join(kinds),
+                    ", ".join(syntaxes),
+                ),
+                open=False,
             )
-            self._nodes_by_oid[node.oid] = node
-            self._iid_by_oid[node.oid] = iid
-            self._oid_by_iid[iid] = node.oid
-            for arc in sorted(node.children):
-                insert(iid, node.children[arc])
+            self._oid_by_iid[iid] = endpoint.oid
+            self._definitions_by_iid[iid] = definitions
+            for chain_node in chain:
+                self._nodes_by_oid[chain_node.oid] = chain_node
+                self._iid_by_oid[chain_node.oid] = iid
+            for arc in sorted(endpoint.children):
+                insert(iid, endpoint.children[arc])
 
-        insert("", root)
+        for arc in sorted(root.children):
+            insert(root_iid, root.children[arc])
 
     def _expand_all(self) -> None:
         self._set_descendants_open("", True)
@@ -235,11 +270,12 @@ class MibExplorerApp(tk.Tk):
         if oid is None:
             return
         node = self._nodes_by_oid[oid]
+        definitions = self._definitions_by_iid.get(selection[0], tuple(node.definitions))
         for tag in self._source_link_tags:
             self._details.tag_delete(tag)
         self._source_link_tags.clear()
 
-        if not node.definitions:
+        if not definitions:
             self._set_text(
                 self._details,
                 f"Structural OID node\n\nNumeric OID: {node.oid_text}\n"
@@ -252,7 +288,7 @@ class MibExplorerApp(tk.Tk):
         links: list[tuple[int, int, str]] = []
         offset = len(parts[0])
 
-        for index, definition in enumerate(node.definitions):
+        for index, definition in enumerate(definitions):
             if index:
                 parts.append(separator)
                 offset += len(separator)
@@ -310,9 +346,11 @@ class MibExplorerApp(tk.Tk):
             self._status_var.set("Enter a name, description, or numeric OID to search.")
             return
 
-        matches: list[tuple[int, ...]] = []
+        matches_by_item: dict[str, tuple[int, ...]] = {}
         for oid, node in self._nodes_by_oid.items():
-            fields = [node.oid_text, node.label, node.kind]
+            iid = self._iid_by_oid.get(oid)
+            display_label = self._tree.item(iid, "text") if iid else ""
+            fields = [node.oid_text, node.label, node.kind, display_label]
             for definition in node.definitions:
                 fields.extend(
                     (
@@ -325,10 +363,10 @@ class MibExplorerApp(tk.Tk):
                         definition.description,
                     )
                 )
-            if needle in " ".join(fields).casefold():
-                matches.append(oid)
+            if iid and needle in " ".join(fields).casefold():
+                matches_by_item.setdefault(iid, oid)
 
-        self._search_matches = sorted(matches)
+        self._search_matches = sorted(matches_by_item.values())
         if not self._search_matches:
             self._next_button.configure(state="disabled")
             self._status_var.set(f"No results for {self._search_var.get().strip()!r}.")
