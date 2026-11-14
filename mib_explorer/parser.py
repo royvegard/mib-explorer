@@ -135,6 +135,7 @@ def _module_definitions(
     source: str,
     raw_descriptions: dict[tuple[str, str], str],
     source_files: dict[str, str],
+    source_paths: dict[str, str],
 ) -> tuple[list[OidDefinition], list[str]]:
     definitions: list[OidDefinition] = []
     warnings: list[str] = []
@@ -168,6 +169,7 @@ def _module_definitions(
                 status=_display_value(entry.get("status")),
                 description=description,
                 source_file=source_files.get(module, ""),
+                source_path=source_paths.get(module, ""),
             )
         )
 
@@ -227,16 +229,31 @@ def load_mibs(paths: Iterable[str | Path]) -> ParseResult:
             suffix = f": {detail}" if detail else ""
             warnings.append(f"{module}: {status_text}{suffix}")
 
-    source_files = {
-        module: Path(str(status.file)).name
-        for module, status in statuses.items()
-        if getattr(status, "file", None)
-    }
+    source_files: dict[str, str] = {}
+    source_paths: dict[str, str] = {}
+    for module, status in statuses.items():
+        source_file = getattr(status, "file", None)
+        if source_file:
+            source_files[module] = Path(str(source_file)).name
+
+        source_uri = getattr(status, "path", None)
+        if isinstance(source_uri, str) and source_uri:
+            source_path = (
+                source_uri.removeprefix("file://")
+                if source_uri.startswith("file://")
+                else source_uri
+            )
+            source_paths[module] = source_path
+            source_files.setdefault(module, Path(source_path).name)
 
     definitions: list[OidDefinition] = []
     for module, document in sorted(generated.items()):
         module_records, module_warnings = _module_definitions(
-            module, document, description_parser.raw_descriptions, source_files
+            module,
+            document,
+            description_parser.raw_descriptions,
+            source_files,
+            source_paths,
         )
         definitions.extend(module_records)
         warnings.extend(module_warnings)

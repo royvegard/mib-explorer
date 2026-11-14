@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import queue
+import subprocess
+import sys
 import threading
 import tkinter as tk
 from collections.abc import Sequence
@@ -28,6 +31,7 @@ class MibExplorerApp(tk.Tk):
         self._search_matches: list[tuple[int, ...]] = []
         self._search_index = 0
         self._loading = False
+        self._source_link_tags: list[str] = []
         self._results: queue.Queue[tuple[ParseResult | None, Exception | None]] = queue.Queue()
 
         self._build_widgets()
@@ -202,6 +206,10 @@ class MibExplorerApp(tk.Tk):
         if oid is None:
             return
         node = self._nodes_by_oid[oid]
+        for tag in self._source_link_tags:
+            self._details.tag_delete(tag)
+        self._source_link_tags.clear()
+
         if not node.definitions:
             self._set_text(
                 self._details,
@@ -210,14 +218,20 @@ class MibExplorerApp(tk.Tk):
             )
             return
 
-        blocks: list[str] = []
-        for definition in node.definitions:
-            lines = [
-                definition.name,
-                f"Module: {definition.module}",
-                f"File: {definition.source_file or 'Unknown'}",
-                f"Numeric OID: {definition.oid_text}",
-            ]
+        separator = "\n\n" + "─" * 48 + "\n\n"
+        parts = ["\n\n"]
+        links: list[tuple[int, int, str]] = []
+        offset = len(parts[0])
+
+        for index, definition in enumerate(node.definitions):
+            if index:
+                parts.append(separator)
+                offset += len(separator)
+
+            lines = [definition.name, f"Module: {definition.module}"]
+            filename = definition.source_file or "Unknown"
+            filename_offset = offset + sum(len(line) + 1 for line in lines) + len("File: ")
+            lines.extend((f"File: {filename}", f"Numeric OID: {definition.oid_text}"))
             if definition.kind:
                 lines.append(f"Type: {definition.kind}")
             if definition.syntax:
@@ -228,8 +242,36 @@ class MibExplorerApp(tk.Tk):
                 lines.append(f"Status: {definition.status}")
             if definition.description:
                 lines.extend(("", "Description:", definition.description.strip()))
-            blocks.append("\n".join(lines))
-        self._set_text(self._details, "\n\n" + ("\n\n" + "─" * 48 + "\n\n").join(blocks))
+
+            block = "\n".join(lines)
+            if definition.source_path:
+                links.append((filename_offset, filename_offset + len(filename), definition.source_path))
+            parts.append(block)
+            offset += len(block)
+
+        self._set_text(self._details, "".join(parts))
+        for index, (start, end, source_path) in enumerate(links):
+            tag = f"source-file-link-{index}"
+            self._source_link_tags.append(tag)
+            start_index = self._details.index(f"1.0 + {start} chars")
+            end_index = self._details.index(f"1.0 + {end} chars")
+            self._details.tag_add(tag, start_index, end_index)
+            self._details.tag_configure(tag, underline=True)
+            self._details.tag_bind(
+                tag,
+                "<Button-1>",
+                lambda _event, path=source_path: self._open_source_file(path),
+            )
+            self._details.tag_bind(
+                tag,
+                "<Enter>",
+                lambda _event: self._details.configure(cursor="hand2"),
+            )
+            self._details.tag_bind(
+                tag,
+                "<Leave>",
+                lambda _event: self._details.configure(cursor=""),
+            )
 
     def _find_matches(self, _event: tk.Event | None = None) -> None:
         needle = self._search_var.get().strip().casefold()
@@ -289,6 +331,31 @@ class MibExplorerApp(tk.Tk):
     def _refresh_warnings(self) -> None:
         text = "\n".join(self._warnings) if self._warnings else "No parser warnings."
         self._set_text(self._warning_text, text)
+
+    def _open_source_file(self, source_path: str) -> str:
+        path = Path(source_path)
+        if not path.is_file():
+            messagebox.showerror(
+                "Could not open MIB file",
+                f"The source file is not available:\n{path}",
+                parent=self,
+            )
+            return "break"
+
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except OSError as exc:
+            messagebox.showerror(
+                "Could not open MIB file",
+                f"Could not open {path}: {exc}",
+                parent=self,
+            )
+        return "break"
 
     @staticmethod
     def _set_text(widget: tk.Text, value: str) -> None:

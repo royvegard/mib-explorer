@@ -19,6 +19,7 @@ class OidDefinition:
     status: str = ""
     description: str = ""
     source_file: str = ""
+    source_path: str = ""
 
     @property
     def oid_text(self) -> str:
