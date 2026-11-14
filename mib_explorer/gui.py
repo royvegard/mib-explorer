@@ -45,7 +45,6 @@ class MibExplorerApp(tk.Tk):
 
         toolbar = ttk.Frame(self, padding=(8, 8, 8, 4))
         toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.columnconfigure(4, weight=3)
 
         self._files_button = ttk.Button(toolbar, text="Open MIB/SMI files…", command=self._choose_files)
         self._files_button.grid(row=0, column=0, padx=(0, 6))
@@ -60,7 +59,13 @@ class MibExplorerApp(tk.Tk):
         self._find_button = ttk.Button(toolbar, text="Find", command=self._find_matches)
         self._find_button.grid(row=0, column=4, sticky="w", padx=(6, 0))
         self._next_button = ttk.Button(toolbar, text="Next", command=self._next_match, state="disabled")
-        self._next_button.grid(row=0, column=5, padx=(6, 0))
+        self._next_button.grid(row=0, column=5, sticky="w", padx=(6, 0))
+        ttk.Button(toolbar, text="Expand all", command=self._expand_all).grid(
+            row=0, column=6, padx=(12, 0)
+        )
+        ttk.Button(toolbar, text="Collapse all", command=self._collapse_all).grid(
+            row=0, column=7, padx=(6, 0)
+        )
 
         content = ttk.Panedwindow(self, orient="horizontal")
         content.grid(row=1, column=0, sticky="nsew", padx=8, pady=4)
@@ -197,6 +202,21 @@ class MibExplorerApp(tk.Tk):
                 insert(iid, node.children[arc])
 
         insert("", root)
+
+    def _expand_all(self) -> None:
+        self._set_descendants_open("", True)
+
+    def _collapse_all(self) -> None:
+        root_iid = self._iid_by_oid.get(())
+        if root_iid is None:
+            return
+        self._set_descendants_open(root_iid, False)
+        self._tree.item(root_iid, open=True)
+
+    def _set_descendants_open(self, parent_iid: str, is_open: bool) -> None:
+        for iid in self._tree.get_children(parent_iid):
+            self._tree.item(iid, open=is_open)
+            self._set_descendants_open(iid, is_open)
 
     def _show_selected_details(self, _event: tk.Event | None = None) -> None:
         selection = self._tree.selection()
