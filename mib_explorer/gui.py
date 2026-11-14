@@ -107,7 +107,6 @@ class MibExplorerApp(tk.Tk):
         paths = filedialog.askopenfilenames(
             parent=self,
             title="Open MIB/SMI files",
-            filetypes=(("MIB and SMI files", "*.mib *.smi *.txt *.my"), ("All files", "*")),
         )
         if paths:
             self._start_loading(paths)

@@ -16,7 +16,6 @@ from pysmi.writer import CallbackWriter
 
 from .model import OidDefinition, parse_oid
 
-SUPPORTED_SUFFIXES = {".mib", ".smi", ".txt", ".my"}
 PYSMI_EXTENSIONS = (
     "",
     ".txt",
@@ -52,12 +51,8 @@ def _collect_files(paths: Iterable[str | Path]) -> tuple[list[Path], list[Path],
         if path.is_dir():
             search_dirs.add(path)
             for candidate in path.rglob("*"):
-                if candidate.is_file() and candidate.suffix.lower() in SUPPORTED_SUFFIXES:
-                    files.add(candidate.resolve())
+                files.add(candidate.resolve())
         elif path.is_file():
-            if path.suffix.lower() not in SUPPORTED_SUFFIXES:
-                warnings.append(f"Unsupported file extension: {path.name}")
-                continue
             files.add(path)
             search_dirs.add(path.parent)
 
