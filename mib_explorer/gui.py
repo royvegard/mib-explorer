@@ -39,7 +39,7 @@ class MibExplorerApp(tk.Tk):
 
         toolbar = ttk.Frame(self, padding=(8, 8, 8, 4))
         toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.columnconfigure(4, weight=1)
+        toolbar.columnconfigure(4, weight=3)
 
         self._files_button = ttk.Button(toolbar, text="Open MIB/SMI files…", command=self._choose_files)
         self._files_button.grid(row=0, column=0, padx=(0, 6))

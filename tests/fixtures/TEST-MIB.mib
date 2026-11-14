@@ -6,7 +6,17 @@ testScalar OBJECT-TYPE
     SYNTAX      INTEGER
     MAX-ACCESS  read-only
     STATUS      current
-    DESCRIPTION "A sample scalar for parser tests."
+    DESCRIPTION
+        "A sample scalar for parser tests.
+        This second line should remain separate.
+
+        This paragraph should also remain separate.
+
+        This paragraph contains some indented text:
+                This is indented
+            So is this line
+
+        Final paragraph."
     ::= { testBranch 1 }
 
 END

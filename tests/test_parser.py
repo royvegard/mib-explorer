@@ -17,7 +17,16 @@ class MibParserTests(unittest.TestCase):
         scalar = definitions[("TEST-MIB", "testScalar")]
         self.assertEqual(scalar.oid, (1, 3, 6, 1, 4, 1, 55555, 1, 1))
         self.assertEqual(scalar.syntax, "INTEGER")
-        self.assertIn("sample scalar", scalar.description)
+        self.assertEqual(
+            scalar.description,
+            "A sample scalar for parser tests.\n"
+            "This second line should remain separate.\n\n"
+            "This paragraph should also remain separate.\n\n"
+            "This paragraph contains some indented text:\n"
+            "        This is indented\n"
+            "    So is this line\n\n"
+            "Final paragraph.",
+        )
 
     def test_compiles_smi_v1_file_with_smi_extension(self) -> None:
         result = load_mibs([FIXTURES / "LEGACY-MIB.smi"])

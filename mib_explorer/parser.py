@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import textwrap
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,7 +70,71 @@ def _display_value(value: object) -> str:
     return str(value)
 
 
-def _module_definitions(module: str, source: str) -> tuple[list[OidDefinition], list[str]]:
+def _find_raw_description(value: object) -> str | None:
+    if isinstance(value, tuple):
+        if len(value) == 2 and value[0] == "DESCRIPTION" and isinstance(value[1], str):
+            return value[1]
+        children = value[1:]
+    elif isinstance(value, list):
+        children = value
+    else:
+        return None
+
+    for child in children:
+        description = _find_raw_description(child)
+        if description is not None:
+            return description
+    return None
+
+
+def _normalize_description_indentation(description: str) -> str:
+    """Remove the common source margin while retaining relative indentation."""
+    first_line, separator, continuation = description.partition("\n")
+    if not separator:
+        return description
+    return first_line + separator + textwrap.dedent(continuation)
+
+
+def _extract_raw_descriptions(parsed_modules: Iterable[object]) -> dict[tuple[str, str], str]:
+    descriptions: dict[tuple[str, str], str] = {}
+    for parsed_module in parsed_modules:
+        if not isinstance(parsed_module, tuple) or len(parsed_module) < 4:
+            continue
+        module_name, declarations = parsed_module[0], parsed_module[3]
+        if not isinstance(module_name, str) or not isinstance(declarations, list):
+            continue
+
+        for declaration in declarations:
+            if not isinstance(declaration, tuple) or len(declaration) < 2:
+                continue
+            symbol_name = declaration[1]
+            if not isinstance(symbol_name, str):
+                continue
+            description = _find_raw_description(declaration)
+            if description is not None:
+                descriptions[(module_name, symbol_name)] = _normalize_description_indentation(
+                    description
+                )
+
+    return descriptions
+
+
+class _DescriptionPreservingParser:
+    def __init__(self) -> None:
+        self._parser = SmiStarParser()
+        self.raw_descriptions: dict[tuple[str, str], str] = {}
+
+    def parse(self, data: str, **kwargs):
+        parsed_modules = self._parser.parse(data, **kwargs)
+        self.raw_descriptions.update(_extract_raw_descriptions(parsed_modules))
+        return parsed_modules
+
+
+def _module_definitions(
+    module: str,
+    source: str,
+    raw_descriptions: dict[tuple[str, str], str],
+) -> tuple[list[OidDefinition], list[str]]:
     definitions: list[OidDefinition] = []
     warnings: list[str] = []
     try:
@@ -89,16 +154,18 @@ def _module_definitions(module: str, source: str) -> tuple[list[OidDefinition], 
             warnings.append(f"Skipped {module}::{symbol}: {exc}")
             continue
 
+        name = str(entry.get("name") or symbol)
+        description = raw_descriptions.get((module, name), str(entry.get("description") or ""))
         definitions.append(
             OidDefinition(
-                name=str(entry.get("name") or symbol),
+                name=name,
                 oid=oid,
                 module=module,
                 kind=str(entry.get("nodetype") or entry.get("class") or ""),
                 syntax=_display_value(entry.get("syntax")),
                 access=str(entry.get("maxaccess") or entry.get("access") or ""),
                 status=_display_value(entry.get("status")),
-                description=str(entry.get("description") or ""),
+                description=description,
             )
         )
 
@@ -134,8 +201,9 @@ def load_mibs(paths: Iterable[str | Path]) -> ParseResult:
     def collect_json(module: str, contents: str, context: dict[str, str]) -> None:
         context[module] = contents
 
+    description_parser = _DescriptionPreservingParser()
     compiler = MibCompiler(
-        SmiStarParser(),
+        description_parser,
         JsonCodeGen(),
         CallbackWriter(collect_json, generated),
     )
@@ -159,7 +227,9 @@ def load_mibs(paths: Iterable[str | Path]) -> ParseResult:
 
     definitions: list[OidDefinition] = []
     for module, document in sorted(generated.items()):
-        module_records, module_warnings = _module_definitions(module, document)
+        module_records, module_warnings = _module_definitions(
+            module, document, description_parser.raw_descriptions
+        )
         definitions.extend(module_records)
         warnings.extend(module_warnings)
 
