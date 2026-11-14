@@ -1,0 +1,11 @@
+LEGACY-MIB DEFINITIONS ::= BEGIN
+
+legacyRoot OBJECT IDENTIFIER ::= { 1 3 6 1 4 1 55556 }
+legacyLeaf OBJECT-TYPE
+    SYNTAX      INTEGER
+    ACCESS      read-only
+    STATUS      mandatory
+    DESCRIPTION "A sample SMIv1 object for parser tests."
+    ::= { legacyRoot 1 }
+
+END

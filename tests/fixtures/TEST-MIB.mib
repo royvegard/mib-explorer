@@ -1,0 +1,12 @@
+TEST-MIB DEFINITIONS ::= BEGIN
+
+testRoot OBJECT IDENTIFIER ::= { 1 3 6 1 4 1 55555 }
+testBranch OBJECT IDENTIFIER ::= { testRoot 1 }
+testScalar OBJECT-TYPE
+    SYNTAX      INTEGER
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "A sample scalar for parser tests."
+    ::= { testBranch 1 }
+
+END
