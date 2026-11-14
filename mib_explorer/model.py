@@ -51,6 +51,11 @@ class OidNode:
         kinds = sorted({definition.kind for definition in self.definitions if definition.kind})
         return ", ".join(kinds)
 
+    @property
+    def syntax(self) -> str:
+        syntaxes = sorted({definition.syntax for definition in self.definitions if definition.syntax})
+        return ", ".join(syntaxes)
+
 
 def parse_oid(value: str | Iterable[int]) -> tuple[int, ...]:
     """Parse a dotted numeric OID into integer arcs."""

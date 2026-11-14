@@ -73,15 +73,24 @@ class MibExplorerApp(tk.Tk):
         tree_frame = ttk.Frame(content, padding=(0, 0, 5, 0))
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
-        self._tree = ttk.Treeview(tree_frame, columns=("oid", "kind"), selectmode="browse")
+        ttk.Style(self).configure("MibExplorer.Treeview", font="TkFixedFont")
+        self._tree = ttk.Treeview(
+            tree_frame,
+            columns=("oid", "kind", "syntax"),
+            selectmode="browse",
+            style="MibExplorer.Treeview",
+        )
         self._tree.heading("#0", text="Name")
         self._tree.heading("oid", text="Numeric OID")
         self._tree.heading("kind", text="Type")
-        self._tree.column("#0", width=210, minwidth=120, stretch=True)
-        self._tree.column("oid", width=240, minwidth=160, stretch=True)
-        self._tree.column("kind", width=115, minwidth=80, stretch=False)
+        self._tree.heading("syntax", text="Syntax")
+        self._tree.column("#0", width=300, minwidth=300, stretch=True)
+        self._tree.column("oid", width=180, minwidth=110, stretch=True)
+        self._tree.column("kind", width=100, minwidth=70, stretch=True)
+        self._tree.column("syntax", width=100, minwidth=70, stretch=True)
         tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self._tree.yview)
-        self._tree.configure(yscrollcommand=tree_scroll.set)
+        tree_xscroll = ttk.Scrollbar(tree_frame, orient="horizontal", command=self._tree.xview)
+        self._tree.configure(yscrollcommand=tree_scroll.set, xscrollcommand=tree_xscroll.set)
         self._tree.grid(row=0, column=0, sticky="nsew")
         tree_scroll.grid(row=0, column=1, sticky="ns")
         self._tree.bind("<<TreeviewSelect>>", self._show_selected_details)
@@ -192,7 +201,7 @@ class MibExplorerApp(tk.Tk):
                 parent_iid,
                 "end",
                 text=node.label,
-                values=(node.oid_text, node.kind),
+                values=(node.oid_text, node.kind, node.syntax),
                 open=(not node.oid),
             )
             self._nodes_by_oid[node.oid] = node
