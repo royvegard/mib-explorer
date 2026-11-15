@@ -187,6 +187,7 @@ class MibExplorerApp(tk.Tk):
         self._results: queue.Queue[tuple[ParseResult | None, Exception | None]] = queue.Queue()
 
         self._build_widgets()
+        self._set_theme("dark")
         self.after(100, self._poll_results)
         if startup_paths:
             self._start_loading(startup_paths)
@@ -212,11 +213,13 @@ class MibExplorerApp(tk.Tk):
         self._find_button.grid(row=0, column=4, sticky="w", padx=(6, 0))
         self._next_button = ttk.Button(toolbar, text="Next", command=self._next_match, state="disabled")
         self._next_button.grid(row=0, column=5, sticky="w", padx=(6, 0))
+        self._prev_button = ttk.Button(toolbar, text="Prev", command=self._previous_match, state="disabled")
+        self._prev_button.grid(row=0, column=6, sticky="w", padx=(6, 0))
         ttk.Button(toolbar, text="Expand all", command=self._expand_all).grid(
-            row=0, column=6, padx=(12, 0)
+            row=0, column=7, padx=(12, 0)
         )
         ttk.Button(toolbar, text="Collapse all", command=self._collapse_all).grid(
-            row=0, column=7, padx=(6, 0)
+            row=0, column=8, padx=(6, 0)
         )
         self._theme_var = tk.StringVar(value=self._style.theme_use())
         self._theme_menu = tk.Menu(toolbar, tearoff=False)
@@ -243,7 +246,7 @@ class MibExplorerApp(tk.Tk):
             text=f"Theme: {self._theme_var.get()}",
             menu=self._theme_menu,
         )
-        self._theme_button.grid(row=0, column=8, padx=(10, 0))
+        self._theme_button.grid(row=0, column=9, padx=(10, 0))
 
         content = ttk.Panedwindow(self, orient="horizontal")
         content.grid(row=1, column=0, sticky="nsew", padx=8, pady=4)
@@ -563,6 +566,7 @@ class MibExplorerApp(tk.Tk):
         if not needle:
             self._search_matches = []
             self._next_button.configure(state="disabled")
+            self._prev_button.configure(state="disabled")
             self._status_var.set("Enter a name, description, or numeric OID to search.")
             return
 
@@ -589,17 +593,25 @@ class MibExplorerApp(tk.Tk):
         self._search_matches = sorted(matches_by_item.values())
         if not self._search_matches:
             self._next_button.configure(state="disabled")
+            self._prev_button.configure(state="disabled")
             self._status_var.set(f"No results for {self._search_var.get().strip()!r}.")
             return
 
         self._next_button.configure(state="normal")
+        self._prev_button.configure(state="normal")
         self._search_index = 0
         self._show_search_match()
 
     def _next_match(self) -> None:
+        self._match(1)
+
+    def _previous_match(self) -> None:
+        self._match(-1)
+
+    def _match(self, direction: int) -> None:
         if not self._search_matches:
             return
-        self._search_index = (self._search_index + 1) % len(self._search_matches)
+        self._search_index = (self._search_index + direction) % len(self._search_matches)
         self._show_search_match()
 
     def _show_search_match(self) -> None:
