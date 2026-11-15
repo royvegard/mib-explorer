@@ -23,7 +23,9 @@ class OidModelTests(unittest.TestCase):
         for arc in definition.oid:
             node = node.children[arc]
         self.assertEqual(node.definitions, [definition])
-        self.assertEqual(node.oid_text, "1.3.6.1.4.1")
+        self.assertEqual(node.oid_text, ".1.3.6.1.4.1")
+        self.assertEqual(definition.oid_text, ".1.3.6.1.4.1")
+        self.assertEqual(root.oid_text, "")
         self.assertEqual(root.label, "OID tree")
 
     def test_node_combines_syntaxes_for_definitions_at_same_oid(self) -> None:

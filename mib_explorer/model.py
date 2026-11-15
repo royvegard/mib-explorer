@@ -23,7 +23,7 @@ class OidDefinition:
 
     @property
     def oid_text(self) -> str:
-        return ".".join(str(arc) for arc in self.oid)
+        return f".{'.'.join(str(arc) for arc in self.oid)}" if self.oid else ""
 
 
 @dataclass(slots=True)
@@ -36,7 +36,7 @@ class OidNode:
 
     @property
     def oid_text(self) -> str:
-        return ".".join(str(arc) for arc in self.oid)
+        return f".{'.'.join(str(arc) for arc in self.oid)}" if self.oid else ""
 
     @property
     def label(self) -> str:
