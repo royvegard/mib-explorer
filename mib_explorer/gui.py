@@ -23,12 +23,156 @@ def _single_child_chain(node: OidNode) -> tuple[OidNode, ...]:
     return tuple(chain)
 
 
+_DARK_THEME = "dark"
+_DARK_COLORS = {
+    "background": "#252A32",
+    "surface": "#323943",
+    "field": "#1E232A",
+    "foreground": "#E6EAF0",
+    "muted": "#A0AAB7",
+    "border": "#4A5565",
+    "active": "#414B59",
+    "selection": "#375A7F",
+    "accent": "#477CA8",
+}
+
+
+def _register_dark_theme(style: ttk.Style) -> None:
+    if _DARK_THEME in style.theme_names():
+        return
+
+    colors = _DARK_COLORS
+    style.theme_create(
+        _DARK_THEME,
+        parent="clam",
+        settings={
+            ".": {
+                "configure": {
+                    "background": colors["background"],
+                    "foreground": colors["foreground"],
+                    "fieldbackground": colors["field"],
+                    "bordercolor": colors["border"],
+                    "darkcolor": colors["background"],
+                    "lightcolor": colors["surface"],
+                    "troughcolor": colors["background"],
+                    "selectbackground": colors["selection"],
+                    "selectforeground": colors["foreground"],
+                }
+            },
+            "TFrame": {"configure": {"background": colors["background"]}},
+            "TLabel": {
+                "configure": {
+                    "background": colors["background"],
+                    "foreground": colors["foreground"],
+                }
+            },
+            "TButton": {
+                "configure": {
+                    "background": colors["surface"],
+                    "foreground": colors["foreground"],
+                    "bordercolor": colors["border"],
+                    "focuscolor": colors["accent"],
+                    "padding": (8, 4),
+                },
+                "map": {
+                    "background": [
+                        ("pressed", colors["accent"]),
+                        ("active", colors["active"]),
+                        ("disabled", colors["surface"]),
+                    ],
+                    "foreground": [("disabled", colors["muted"])],
+                },
+            },
+            "TMenubutton": {
+                "configure": {
+                    "background": colors["surface"],
+                    "foreground": colors["foreground"],
+                    "bordercolor": colors["border"],
+                    "focuscolor": colors["accent"],
+                    "padding": (8, 4),
+                },
+                "map": {
+                    "background": [
+                        ("pressed", colors["accent"]),
+                        ("active", colors["active"]),
+                    ]
+                },
+            },
+            "TEntry": {
+                "configure": {
+                    "fieldbackground": colors["field"],
+                    "foreground": colors["foreground"],
+                    "insertcolor": colors["foreground"],
+                    "bordercolor": colors["border"],
+                    "lightcolor": colors["border"],
+                    "darkcolor": colors["border"],
+                    "selectbackground": colors["selection"],
+                    "selectforeground": colors["foreground"],
+                },
+                "map": {
+                    "fieldbackground": [("disabled", colors["surface"])],
+                    "foreground": [("disabled", colors["muted"])],
+                },
+            },
+            "Treeview": {
+                "configure": {
+                    "background": colors["field"],
+                    "fieldbackground": colors["field"],
+                    "foreground": colors["foreground"],
+                    "bordercolor": colors["border"],
+                },
+                "map": {
+                    "background": [("selected", colors["selection"])],
+                    "foreground": [("selected", colors["foreground"])],
+                },
+            },
+            "Treeview.Heading": {
+                "configure": {
+                    "background": colors["surface"],
+                    "foreground": colors["foreground"],
+                    "bordercolor": colors["border"],
+                },
+                "map": {"background": [("active", colors["active"])]},
+            },
+            "TLabelframe": {
+                "configure": {
+                    "background": colors["background"],
+                    "foreground": colors["foreground"],
+                    "bordercolor": colors["border"],
+                }
+            },
+            "TLabelframe.Label": {
+                "configure": {
+                    "background": colors["background"],
+                    "foreground": colors["foreground"],
+                }
+            },
+            "TScrollbar": {
+                "configure": {
+                    "background": colors["surface"],
+                    "troughcolor": colors["background"],
+                    "bordercolor": colors["border"],
+                    "arrowcolor": colors["foreground"],
+                },
+                "map": {
+                    "background": [("active", colors["active"]), ("pressed", colors["accent"])],
+                },
+            },
+            "TPanedwindow": {"configure": {"background": colors["border"]}},
+            "TSeparator": {"configure": {"background": colors["border"]}},
+        },
+    )
+
+
 class MibExplorerApp(tk.Tk):
     def __init__(self, startup_paths: Sequence[str | Path] = ()) -> None:
         super().__init__()
         self.title("MIB Explorer")
         self.geometry("1120x720")
         self.minsize(760, 480)
+        self._style = ttk.Style(self)
+        _register_dark_theme(self._style)
+        self._default_window_background = self.cget("background")
 
         self._definitions: dict[tuple[str, str, tuple[int, ...]], OidDefinition] = {}
         self._warnings: list[str] = []
@@ -74,6 +218,32 @@ class MibExplorerApp(tk.Tk):
         ttk.Button(toolbar, text="Collapse all", command=self._collapse_all).grid(
             row=0, column=7, padx=(6, 0)
         )
+        self._theme_var = tk.StringVar(value=self._style.theme_use())
+        self._theme_menu = tk.Menu(toolbar, tearoff=False)
+        self._default_theme_menu_colors = {
+            option: self._theme_menu.cget(option)
+            for option in (
+                "background",
+                "foreground",
+                "activebackground",
+                "activeforeground",
+                "disabledforeground",
+                "selectcolor",
+            )
+        }
+        for theme in self._style.theme_names():
+            self._theme_menu.add_radiobutton(
+                label=theme,
+                variable=self._theme_var,
+                value=theme,
+                command=lambda selected_theme=theme: self._set_theme(selected_theme),
+            )
+        self._theme_button = ttk.Menubutton(
+            toolbar,
+            text=f"Theme: {self._theme_var.get()}",
+            menu=self._theme_menu,
+        )
+        self._theme_button.grid(row=0, column=8, padx=(10, 0))
 
         content = ttk.Panedwindow(self, orient="horizontal")
         content.grid(row=1, column=0, sticky="nsew", padx=8, pady=4)
@@ -81,7 +251,7 @@ class MibExplorerApp(tk.Tk):
         tree_frame = ttk.Frame(content, padding=(0, 0, 5, 0))
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
-        ttk.Style(self).configure("MibExplorer.Treeview", font="TkFixedFont")
+        self._style.configure("MibExplorer.Treeview", font="TkFixedFont")
         self._tree = ttk.Treeview(
             tree_frame,
             columns=("oid", "kind", "syntax"),
@@ -130,6 +300,56 @@ class MibExplorerApp(tk.Tk):
         self.rowconfigure(3, weight=0)
         self._set_text(self._details, "Select an OID node to inspect its MIB definitions.")
         self._refresh_warnings()
+        text_options = (
+            "background",
+            "foreground",
+            "insertbackground",
+            "selectbackground",
+            "selectforeground",
+            "highlightbackground",
+            "highlightcolor",
+        )
+        self._default_text_colors = [
+            (widget, {option: widget.cget(option) for option in text_options})
+            for widget in (self._details, self._warning_text)
+        ]
+
+    def _set_theme(self, theme: str) -> None:
+        if theme not in self._style.theme_names():
+            return
+        self._style.theme_use(theme)
+        self._style.configure("MibExplorer.Treeview", font="TkFixedFont")
+        self._theme_var.set(theme)
+        self._theme_button.configure(text=f"Theme: {theme}")
+        if theme == _DARK_THEME:
+            self._apply_dark_colors()
+        else:
+            self.configure(background=self._default_window_background)
+            self._theme_menu.configure(**self._default_theme_menu_colors)
+            for widget, colors in self._default_text_colors:
+                widget.configure(**colors)
+
+    def _apply_dark_colors(self) -> None:
+        colors = _DARK_COLORS
+        self.configure(background=colors["background"])
+        self._theme_menu.configure(
+            background=colors["surface"],
+            foreground=colors["foreground"],
+            activebackground=colors["selection"],
+            activeforeground=colors["foreground"],
+            disabledforeground=colors["muted"],
+            selectcolor=colors["accent"],
+        )
+        for widget in (self._details, self._warning_text):
+            widget.configure(
+                background=colors["field"],
+                foreground=colors["foreground"],
+                insertbackground=colors["foreground"],
+                selectbackground=colors["selection"],
+                selectforeground=colors["foreground"],
+                highlightbackground=colors["border"],
+                highlightcolor=colors["accent"],
+            )
 
     def _choose_files(self) -> None:
         paths = filedialog.askopenfilenames(
