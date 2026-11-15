@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import unittest
 from typing import Any
 
@@ -69,25 +70,16 @@ class FakeDetails:
     def tag_remove(self, _tag: str, _start: str, _end: str) -> None:
         self.highlight_ranges.clear()
 
-    def search(
-        self,
-        pattern: str,
-        start: str,
-        stopindex: str,
-        nocase: bool,
-    ) -> str:
-        start_offset = 0 if start == "1.0" else int(start)
-        haystack = self.value.casefold() if nocase else self.value
-        needle = pattern.casefold() if nocase else pattern
-        match_offset = haystack.find(needle, start_offset)
-        return "" if match_offset < 0 else str(match_offset)
-
-    def index(self, expression: str) -> str:
-        parts = expression.split()
-        return str(int(parts[0]) + int(parts[2]))
+    def get(self, _start: str, _end: str) -> str:
+        return self.value
 
     def tag_add(self, _tag: str, start: str, end: str) -> None:
-        self.highlight_ranges.append((int(start), int(end)))
+        self.highlight_ranges.append((self._offset(start), self._offset(end)))
+
+    def _offset(self, index: str) -> int:
+        line, column = (int(part) for part in index.split("."))
+        lines = self.value.splitlines(keepends=True)
+        return sum(len(part) for part in lines[: line - 1]) + column
 
 
 class FakeVariable:
@@ -112,6 +104,7 @@ class TreeRebuildHarness:
     _highlight_search_matches = MibExplorerApp._highlight_search_matches
     _clear_details_search_highlight = MibExplorerApp._clear_details_search_highlight
     _highlight_details_matches = MibExplorerApp._highlight_details_matches
+    _text_index_for_offset = staticmethod(MibExplorerApp._text_index_for_offset)
     _find_matches = MibExplorerApp._find_matches
 
     def __init__(self, definitions: list[OidDefinition]) -> None:
@@ -125,7 +118,8 @@ class TreeRebuildHarness:
         self._iid_by_oid = {}
         self._oid_by_iid = {}
         self._definitions_by_iid = {}
-        self._search_var = FakeVariable("org.dod.internet")
+        self._search_var = FakeVariable(r"^org\.dod\.internet$")
+        self._search_pattern: re.Pattern[str] | None = None
         self._next_button = FakeButton()
         self._prev_button = FakeButton()
         self._status_var = FakeVariable("")
@@ -152,13 +146,23 @@ class TreeControlTests(unittest.TestCase):
 
         self.assertEqual(app._tree.open_states, {"1": False, "3": False, "6": False, "root": True})
 
-    def test_details_highlight_every_case_insensitive_search_match(self) -> None:
+    def test_details_highlight_every_case_insensitive_regex_match(self) -> None:
         app = TreeRebuildHarness([])
-        app._search_var.set("needle")
+        app._details = FakeDetails("foo12 FOO3 foo")
+        app._search_pattern = re.compile(r"foo\d+", re.IGNORECASE)
 
         app._highlight_details_matches()
 
-        self.assertEqual(app._details.highlight_ranges, [(0, 6), (7, 13), (14, 20)])
+        self.assertEqual(app._details.highlight_ranges, [(0, 5), (6, 10)])
+
+    def test_invalid_regular_expression_is_reported(self) -> None:
+        app = TreeRebuildHarness([])
+        app._search_var.set("[")
+
+        app._find_matches()
+
+        self.assertEqual(app._search_matches, [])
+        self.assertIn("Invalid regular expression", app._status_var.value)
 
     def test_single_child_chains_are_combined_and_keep_all_definitions(self) -> None:
         definitions = [

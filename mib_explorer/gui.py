@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -183,6 +184,7 @@ class MibExplorerApp(tk.Tk):
         self._oid_by_iid: dict[str, tuple[int, ...]] = {}
         self._definitions_by_iid: dict[str, tuple[OidDefinition, ...]] = {}
         self._search_matches: list[tuple[int, ...]] = []
+        self._search_pattern: re.Pattern[str] | None = None
         self._search_highlight_iids: set[str] = set()
         self._search_index = 0
         self._loading = False
@@ -594,18 +596,20 @@ class MibExplorerApp(tk.Tk):
 
     def _highlight_details_matches(self) -> None:
         self._clear_details_search_highlight()
-        needle = self._search_var.get().strip()
-        if not needle:
+        if self._search_pattern is None:
             return
 
-        start = "1.0"
-        while True:
-            match = self._details.search(needle, start, stopindex="end", nocase=True)
-            if not match:
-                break
-            match_end = self._details.index(f"{match} + {len(needle)} chars")
-            self._details.tag_add(_SEARCH_MATCH_TAG, match, match_end)
-            start = match_end
+        details = self._details.get("1.0", "end-1c")
+        for match in self._search_pattern.finditer(details):
+            start = self._text_index_for_offset(details, match.start())
+            end = self._text_index_for_offset(details, match.end())
+            self._details.tag_add(_SEARCH_MATCH_TAG, start, end)
+
+    @staticmethod
+    def _text_index_for_offset(text: str, offset: int) -> str:
+        line = text.count("\n", 0, offset) + 1
+        line_start = text.rfind("\n", 0, offset) + 1
+        return f"{line}.{offset - line_start}"
 
     def _clear_search_highlights(self) -> None:
         for iid in self._search_highlight_iids:
@@ -626,12 +630,23 @@ class MibExplorerApp(tk.Tk):
     def _find_matches(self, _event: tk.Event | None = None) -> None:
         self._clear_search_highlights()
         self._clear_details_search_highlight()
-        needle = self._search_var.get().strip().casefold()
-        if not needle:
+        query = self._search_var.get().strip()
+        if not query:
+            self._search_pattern = None
             self._search_matches = []
             self._next_button.configure(state="disabled")
             self._prev_button.configure(state="disabled")
-            self._status_var.set("Enter a name, description, or numeric OID to search.")
+            self._status_var.set("Enter a regular expression to search names, descriptions, metadata, or OIDs.")
+            return
+
+        try:
+            self._search_pattern = re.compile(query, re.IGNORECASE)
+        except re.error as exc:
+            self._search_pattern = None
+            self._search_matches = []
+            self._next_button.configure(state="disabled")
+            self._prev_button.configure(state="disabled")
+            self._status_var.set(f"Invalid regular expression: {exc}")
             return
 
         matches_by_item: dict[str, tuple[int, ...]] = {}
@@ -651,7 +666,7 @@ class MibExplorerApp(tk.Tk):
                         definition.description,
                     )
                 )
-            if iid and needle in " ".join(fields).casefold():
+            if iid and any(self._search_pattern.search(field) for field in fields):
                 matches_by_item.setdefault(iid, oid)
 
         self._search_matches = sorted(matches_by_item.values())

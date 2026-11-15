@@ -33,7 +33,7 @@ python -m mib_explorer ./mibs ./vendor/EXTRA-MIB
 
 Directories are searched recursively. Without paths, choose one or more `.mib`/`.smi` files, or a folder in the GUI. `.txt` and `.my` MIB repositories are also accepted. PySMI resolves imported modules using the selected files' directories and recursively searched folders. For local imports to resolve, keep dependent MIB files in those locations; this application does not fetch MIBs from the network.
 
-Filenames should conventionally match their MIB module names (case-insensitive), as PySMI resolves source modules by module name. Parser/compiler warnings appear below the OID browser. Search matches names, descriptions, metadata, or numeric OIDs.
+Filenames should conventionally match their MIB module names (case-insensitive), as PySMI resolves source modules by module name. Parser/compiler warnings appear below the OID browser. Search accepts case-insensitive Python regular expressions and matches names, descriptions, metadata, or numeric OIDs.
 
 ## Tests
 
