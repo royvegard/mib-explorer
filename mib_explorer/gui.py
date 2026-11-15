@@ -74,6 +74,7 @@ class _SnmpResultsView:
     table_row_cells: dict[tuple[int, ...], dict[tuple[int, ...], str]] = field(
         default_factory=dict
     )
+    oid_by_row_iid: dict[str, tuple[int, ...]] = field(default_factory=dict)
 
 
 _DARK_THEME = "dark"
@@ -355,7 +356,8 @@ class MibExplorerApp(tk.Tk):
 
         self._notebook = ttk.Notebook(self)
         self._notebook.grid(row=2, column=0, sticky="nsew", padx=8, pady=4)
-        browser_tab = ttk.Frame(self._notebook)
+        self._browser_tab = ttk.Frame(self._notebook)
+        browser_tab = self._browser_tab
         browser_tab.rowconfigure(0, weight=1)
         browser_tab.columnconfigure(0, weight=1)
         self._notebook.add(browser_tab, text="MIB Browser")
@@ -743,6 +745,13 @@ class MibExplorerApp(tk.Tk):
             text="Close tab",
             command=lambda: self._close_snmp_tab(request_id),
         ).grid(row=0, column=3, sticky="e")
+        tree.bind(
+            "<Double-1>",
+            lambda event, selected_request_id=request_id: self._show_result_oid(
+                selected_request_id,
+                event,
+            ),
+        )
         self._start_snmp_request(request_id)
 
     def _start_snmp_request(self, request_id: int) -> None:
@@ -823,6 +832,66 @@ class MibExplorerApp(tk.Tk):
             view.abort_button.configure(state="disabled")
         view.status_var.set("Aborting SNMP walk; keeping fetched values…")
 
+    def _show_result_oid(self, request_id: int, event: tk.Event) -> str:
+        view = self._snmp_views.get(request_id)
+        if view is None:
+            return "break"
+
+        row_iid = view.tree.identify_row(event.y)
+        oid = view.oid_by_row_iid.get(row_iid)
+        if oid is not None:
+            self._navigate_to_oid(oid)
+        return "break"
+
+    def _navigate_to_oid(self, oid: tuple[int, ...]) -> None:
+        target_iid = None
+        for prefix_length in range(len(oid), 0, -1):
+            target_iid = self._iid_by_oid.get(oid[:prefix_length])
+            if target_iid is not None:
+                break
+        if target_iid is None:
+            return
+
+        self._notebook.select(self._browser_tab)
+        ancestor_iid = self._tree.parent(target_iid)
+        while ancestor_iid:
+            self._tree.item(ancestor_iid, open=True)
+            ancestor_iid = self._tree.parent(ancestor_iid)
+        self._tree.selection_set(target_iid)
+        self._tree.focus(target_iid)
+        self._tree.see(target_iid)
+        self._show_selected_details()
+
+    def _oid_name_for_result(self, oid_text: str) -> str:
+        name = self._oid_name_for_text(oid_text)
+        try:
+            oid = parse_oid(oid_text)
+        except ValueError:
+            return name
+        return name if self._result_oid_is_defined(oid) else f"{name}*"
+
+    def _result_oid_is_defined(self, oid: tuple[int, ...]) -> bool:
+        exact_node = self._nodes_by_oid.get(oid)
+        if exact_node is not None and exact_node.definitions:
+            return True
+
+        for prefix_length in range(len(oid) - 1, 0, -1):
+            node = self._nodes_by_oid.get(oid[:prefix_length])
+            if node is None:
+                continue
+            suffix = oid[prefix_length:]
+            for definition in node.definitions:
+                kind = "".join(
+                    character
+                    for character in definition.kind.casefold()
+                    if character.isalnum()
+                )
+                if kind in {"scalar", "mibscalar"} and suffix == (0,):
+                    return True
+                if kind in {"column", "tablecolumn", "mibtablecolumn"} and suffix:
+                    return True
+        return False
+
     def _oid_name_for_text(self, oid_text: str) -> str:
         try:
             oid = parse_oid(oid_text)
@@ -846,6 +915,7 @@ class MibExplorerApp(tk.Tk):
         view.received_count = 0
         view.table_row_iids.clear()
         view.table_row_cells.clear()
+        view.oid_by_row_iid.clear()
 
     def _poll_snmp_results(self) -> None:
         # Limit each pass so Tk can redraw between batches during large walks.
@@ -902,6 +972,7 @@ class MibExplorerApp(tk.Tk):
                     view.table_row_iids[row_index] = row_iid
                     view.table_row_cells[row_index] = {}
 
+                view.oid_by_row_iid.setdefault(row_iid, parse_oid(value.oid))
                 cells = view.table_row_cells[row_index]
                 cells[column_oid] = cell_value
                 row_values = (
@@ -911,16 +982,20 @@ class MibExplorerApp(tk.Tk):
                 view.tree.item(row_iid, values=row_values)
         else:
             for value in values:
-                view.tree.insert(
+                row_iid = view.tree.insert(
                     "",
                     "end",
                     values=(
-                        self._oid_name_for_text(value.oid),
+                        self._oid_name_for_result(value.oid),
                         value.oid,
                         value.syntax,
                         value.value,
                     ),
                 )
+                try:
+                    view.oid_by_row_iid[row_iid] = parse_oid(value.oid)
+                except ValueError:
+                    continue
 
         if view.table_columns:
             view.status_var.set(

@@ -75,6 +75,9 @@ class FakeResultTree:
     def __init__(self, rows: list[tuple[str, ...]]) -> None:
         self.rows = rows
 
+    def identify_row(self, _y: int) -> str:
+        return "row"
+
     def get_children(self, _parent: str) -> list[int]:
         return list(range(len(self.rows)))
 
@@ -108,9 +111,13 @@ class FakeTab:
 class FakeNotebook:
     def __init__(self) -> None:
         self.forgotten: list[FakeTab] = []
+        self.selected: object | None = None
 
     def forget(self, tab: FakeTab) -> None:
         self.forgotten.append(tab)
+
+    def select(self, tab: object) -> None:
+        self.selected = tab
 
 
 class FakeDetails:
@@ -173,11 +180,34 @@ class PreviousMatchHarness:
 
 class OidNameHarness:
     _oid_name_for_text = MibExplorerApp._oid_name_for_text
+    _oid_name_for_result = MibExplorerApp._oid_name_for_result
+    _result_oid_is_defined = MibExplorerApp._result_oid_is_defined
 
     def __init__(self) -> None:
-        definition = OidDefinition("sysDescr", (1, 3, 6, 1, 2, 1, 1, 1), "SNMPv2-MIB")
-        oid = definition.oid
-        self._nodes_by_oid = {oid: OidNode(oid, definitions=[definition])}
+        definitions = (
+            OidDefinition(
+                "system",
+                (1, 3, 6, 1, 2, 1, 1),
+                "RFC1213-MIB",
+                kind="objectidentity",
+            ),
+            OidDefinition(
+                "sysDescr",
+                (1, 3, 6, 1, 2, 1, 1, 1),
+                "RFC1213-MIB",
+                kind="scalar",
+            ),
+            OidDefinition(
+                "ifDescr",
+                (1, 3, 6, 1, 2, 1, 2, 2, 1, 2),
+                "IF-MIB",
+                kind="MibTableColumn",
+            ),
+        )
+        self._nodes_by_oid = {
+            definition.oid: OidNode(definition.oid, definitions=[definition])
+            for definition in definitions
+        }
 
 
 class FakeContextTree:
@@ -238,6 +268,8 @@ class SnmpResultsPollingHarness:
     _append_snmp_values = MibExplorerApp._append_snmp_values
     _finish_snmp_results = staticmethod(MibExplorerApp._finish_snmp_results)
     _oid_name_for_text = MibExplorerApp._oid_name_for_text
+    _oid_name_for_result = MibExplorerApp._oid_name_for_result
+    _result_oid_is_defined = MibExplorerApp._result_oid_is_defined
     _clear_snmp_result_view = staticmethod(MibExplorerApp._clear_snmp_result_view)
 
     def __init__(self, rows: list[tuple[str, ...]]) -> None:
@@ -262,8 +294,54 @@ class SnmpResultsPollingHarness:
             received_count=0,
             table_row_iids={},
             table_row_cells={},
+            oid_by_row_iid={},
         )
         self._snmp_views = {1: self.view}
+
+
+class FakeNavigationTree:
+    def __init__(self) -> None:
+        self.parents = {"leaf": "branch", "branch": "root", "root": ""}
+        self.open_states: dict[str, bool] = {}
+        self.selected: str | None = None
+        self.focused: str | None = None
+        self.seen: str | None = None
+
+    def parent(self, iid: str) -> str:
+        return self.parents[iid]
+
+    def item(self, iid: str, **options: bool) -> None:
+        self.open_states[iid] = options["open"]
+
+    def selection_set(self, iid: str) -> None:
+        self.selected = iid
+
+    def focus(self, iid: str) -> None:
+        self.focused = iid
+
+    def see(self, iid: str) -> None:
+        self.seen = iid
+
+
+class OidNavigationHarness:
+    _show_result_oid = MibExplorerApp._show_result_oid
+    _navigate_to_oid = MibExplorerApp._navigate_to_oid
+
+    def __init__(self) -> None:
+        self._snmp_views = {
+            1: SimpleNamespace(
+                tree=FakeResultTree([]),
+                oid_by_row_iid={"row": (1, 3, 6, 1, 2, 1)},
+            )
+        }
+        self._iid_by_oid = {(1,): "root", (1, 3): "branch", (1, 3, 6): "leaf"}
+        self._tree = FakeNavigationTree()
+        self._notebook = FakeNotebook()
+        self._browser_tab = object()
+        self.details_updated = False
+
+    def _show_selected_details(self) -> None:
+        self.details_updated = True
 
 
 class TableDefinitionHarness:
@@ -348,6 +426,32 @@ class TreeControlTests(unittest.TestCase):
 
         self.assertEqual(app._oid_name_for_text(".1.3.6.1.99"), ".1.3.6.1.99")
 
+    def test_unresolved_result_oid_name_has_an_asterisk(self) -> None:
+        app = OidNameHarness()
+
+        self.assertEqual(app._oid_name_for_result(".1.3.6.1.2.1.1.1"), "sysDescr")
+        self.assertEqual(app._oid_name_for_result(".1.3.6.1.2.1.1.1.0"), "sysDescr.0")
+        self.assertEqual(app._oid_name_for_result(".1.3.6.1.2.1.1.8.1"), "system.8.1*")
+        self.assertEqual(app._oid_name_for_result(".1.3.6.1.2.1.1.8.0"), "system.8.0*")
+        self.assertEqual(
+            app._oid_name_for_result(".1.3.6.1.2.1.2.2.1.2.7"),
+            "ifDescr.7",
+        )
+        self.assertEqual(app._oid_name_for_result(".1.3.6.1.99"), ".1.3.6.1.99*")
+
+    def test_double_clicking_result_row_selects_nearest_mib_node(self) -> None:
+        app = OidNavigationHarness()
+
+        result = app._show_result_oid(1, cast(Any, SimpleNamespace(y=12)))
+
+        self.assertEqual(result, "break")
+        self.assertEqual(app._notebook.selected, app._browser_tab)
+        self.assertEqual(app._tree.selected, "leaf")
+        self.assertEqual(app._tree.focused, "leaf")
+        self.assertEqual(app._tree.seen, "leaf")
+        self.assertEqual(app._tree.open_states, {"branch": True, "root": True})
+        self.assertTrue(app.details_updated)
+
     def test_context_menu_walk_starts_at_selected_oid_and_runs_to_mib_end(self) -> None:
         app = WalkContextMenuHarness()
 
@@ -383,7 +487,8 @@ class TreeControlTests(unittest.TestCase):
 
         app._poll_snmp_results()
 
-        self.assertEqual(app.tree.rows, [(".1.3.6", ".1.3.6", "Integer32", "42")])
+        self.assertEqual(app.tree.rows, [(".1.3.6*", ".1.3.6", "Integer32", "42")])
+        self.assertEqual(app.view.oid_by_row_iid, {"0": (1, 3, 6)})
         self.assertEqual(app.view.status_var.value, "Received 1 value(s)…")
         self.assertTrue(app.view.loading)
 
@@ -404,7 +509,7 @@ class TreeControlTests(unittest.TestCase):
 
         app._poll_snmp_results()
 
-        self.assertEqual(app.tree.rows, [(".1.3.6", ".1.3.6", "Integer32", "42")])
+        self.assertEqual(app.tree.rows, [(".1.3.6*", ".1.3.6", "Integer32", "42")])
         self.assertEqual(app.view.status_var.value, "Read aborted after 1 value(s).")
         self.assertEqual(app.button.state, "normal")
         self.assertEqual(app.abort_button.state, "disabled")
@@ -446,7 +551,7 @@ class TreeControlTests(unittest.TestCase):
 
         app._poll_snmp_results()
 
-        self.assertEqual(app.tree.rows, [(".1.3.6", ".1.3.6", "Integer32", "42")])
+        self.assertEqual(app.tree.rows, [(".1.3.6*", ".1.3.6", "Integer32", "42")])
         self.assertEqual(app.view.status_var.value, "SNMP walk failed: timed out")
         self.assertEqual(app.button.state, "normal")
         self.assertFalse(app.view.loading)
@@ -470,6 +575,7 @@ class TreeControlTests(unittest.TestCase):
 
         self.assertEqual(app.tree.rows, [("7", "7", "ready")])
         self.assertEqual(app.view.table_row_iids, {(7,): "0"})
+        self.assertEqual(app.view.oid_by_row_iid, {"0": (1, 3, 6, 1, 7)})
 
     def test_table_column_definitions_are_collected_under_row_oid(self) -> None:
         app = TableDefinitionHarness()
