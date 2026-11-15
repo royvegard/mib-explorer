@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import Any
 
 from mib_explorer.gui import MibExplorerApp
 from mib_explorer.model import OidDefinition
@@ -52,10 +53,41 @@ class RecordingTree:
         self.children[iid] = []
         return iid
 
-    def item(self, iid: str, option: str | None = None, **options: object) -> object:
+    def item(self, iid: str, option: str | None = None, **options: object) -> Any:
+        if options:
+            self.items[iid].update(options)
         if option is not None:
-            return self.items[iid][option]
+            return self.items[iid].get(option, ())
         return self.items[iid]
+
+
+class FakeDetails:
+    def __init__(self, value: str) -> None:
+        self.value = value
+        self.highlight_ranges: list[tuple[int, int]] = []
+
+    def tag_remove(self, _tag: str, _start: str, _end: str) -> None:
+        self.highlight_ranges.clear()
+
+    def search(
+        self,
+        pattern: str,
+        start: str,
+        stopindex: str,
+        nocase: bool,
+    ) -> str:
+        start_offset = 0 if start == "1.0" else int(start)
+        haystack = self.value.casefold() if nocase else self.value
+        needle = pattern.casefold() if nocase else pattern
+        match_offset = haystack.find(needle, start_offset)
+        return "" if match_offset < 0 else str(match_offset)
+
+    def index(self, expression: str) -> str:
+        parts = expression.split()
+        return str(int(parts[0]) + int(parts[2]))
+
+    def tag_add(self, _tag: str, start: str, end: str) -> None:
+        self.highlight_ranges.append((int(start), int(end)))
 
 
 class FakeVariable:
@@ -65,6 +97,9 @@ class FakeVariable:
     def get(self) -> str:
         return self.value
 
+    def set(self, value: str) -> None:
+        self.value = value
+
 
 class FakeButton:
     def configure(self, **_options: str) -> None:
@@ -73,6 +108,10 @@ class FakeButton:
 
 class TreeRebuildHarness:
     _rebuild_tree = MibExplorerApp._rebuild_tree
+    _clear_search_highlights = MibExplorerApp._clear_search_highlights
+    _highlight_search_matches = MibExplorerApp._highlight_search_matches
+    _clear_details_search_highlight = MibExplorerApp._clear_details_search_highlight
+    _highlight_details_matches = MibExplorerApp._highlight_details_matches
     _find_matches = MibExplorerApp._find_matches
 
     def __init__(self, definitions: list[OidDefinition]) -> None:
@@ -81,13 +120,17 @@ class TreeRebuildHarness:
             for definition in definitions
         }
         self._tree = RecordingTree()
+        self._details = FakeDetails("needle NEEDLE needle")
         self._nodes_by_oid = {}
         self._iid_by_oid = {}
         self._oid_by_iid = {}
         self._definitions_by_iid = {}
         self._search_var = FakeVariable("org.dod.internet")
         self._next_button = FakeButton()
+        self._prev_button = FakeButton()
+        self._status_var = FakeVariable("")
         self._search_matches: list[tuple[int, ...]] = []
+        self._search_highlight_iids: set[str] = set()
         self._search_index = 0
 
     def _show_search_match(self) -> None:
@@ -109,6 +152,14 @@ class TreeControlTests(unittest.TestCase):
 
         self.assertEqual(app._tree.open_states, {"1": False, "3": False, "6": False, "root": True})
 
+    def test_details_highlight_every_case_insensitive_search_match(self) -> None:
+        app = TreeRebuildHarness([])
+        app._search_var.set("needle")
+
+        app._highlight_details_matches()
+
+        self.assertEqual(app._details.highlight_ranges, [(0, 6), (7, 13), (14, 20)])
+
     def test_single_child_chains_are_combined_and_keep_all_definitions(self) -> None:
         definitions = [
             OidDefinition("org", (1,), "TEST-MIB"),
@@ -127,9 +178,12 @@ class TreeControlTests(unittest.TestCase):
         self.assertEqual(app._tree.items[iid]["text"], "org.dod.internet")
         self.assertEqual(app._oid_by_iid[iid], (1, 3, 6))
         self.assertEqual(app._definitions_by_iid[iid], tuple(definitions[:3]))
+        self.assertIn("search_match", app._tree.item(iid, "tags"))
 
+        app._search_var.set("no-such-node")
         app._find_matches()
-        self.assertEqual(len(app._search_matches), 1)
+        self.assertEqual(app._search_matches, [])
+        self.assertNotIn("search_match", app._tree.item(iid, "tags"))
 
 
 if __name__ == "__main__":

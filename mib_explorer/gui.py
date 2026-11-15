@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -24,6 +24,8 @@ def _single_child_chain(node: OidNode) -> tuple[OidNode, ...]:
 
 
 _DARK_THEME = "dark"
+_SEARCH_MATCH_TAG = "search_match"
+
 _DARK_COLORS = {
     "background": "#252A32",
     "surface": "#323943",
@@ -181,6 +183,7 @@ class MibExplorerApp(tk.Tk):
         self._oid_by_iid: dict[str, tuple[int, ...]] = {}
         self._definitions_by_iid: dict[str, tuple[OidDefinition, ...]] = {}
         self._search_matches: list[tuple[int, ...]] = []
+        self._search_highlight_iids: set[str] = set()
         self._search_index = 0
         self._loading = False
         self._source_link_tags: list[str] = []
@@ -301,6 +304,7 @@ class MibExplorerApp(tk.Tk):
         self._warning_text.grid(row=0, column=0, sticky="ew")
         warning_scroll.grid(row=0, column=1, sticky="ns")
         self.rowconfigure(3, weight=0)
+        self._configure_search_match_tag()
         self._set_text(self._details, "Select an OID node to inspect its MIB definitions.")
         self._refresh_warnings()
         text_options = (
@@ -331,6 +335,7 @@ class MibExplorerApp(tk.Tk):
             self._theme_menu.configure(**self._default_theme_menu_colors)
             for widget, colors in self._default_text_colors:
                 widget.configure(**colors)
+        self._configure_search_match_tag()
 
     def _apply_dark_colors(self) -> None:
         colors = _DARK_COLORS
@@ -353,6 +358,22 @@ class MibExplorerApp(tk.Tk):
                 highlightbackground=colors["border"],
                 highlightcolor=colors["accent"],
             )
+
+    def _configure_search_match_tag(self) -> None:
+        if self._style.theme_use() == _DARK_THEME:
+            background, foreground = "#66531F", "#FFF1C2"
+        else:
+            background, foreground = "#FFF0A8", "#332B14"
+        self._tree.tag_configure(
+            _SEARCH_MATCH_TAG,
+            background=background,
+            foreground=foreground,
+        )
+        self._details.tag_configure(
+            _SEARCH_MATCH_TAG,
+            background=background,
+            foreground=foreground,
+        )
 
     def _choose_files(self) -> None:
         paths = filedialog.askopenfilenames(
@@ -421,6 +442,7 @@ class MibExplorerApp(tk.Tk):
             self._status_var.set("No modules were compiled. See parser warnings below.")
 
     def _rebuild_tree(self) -> None:
+        self._clear_search_highlights()
         self._tree.delete(*self._tree.get_children(""))
         self._nodes_by_oid.clear()
         self._iid_by_oid.clear()
@@ -470,6 +492,9 @@ class MibExplorerApp(tk.Tk):
         for arc in sorted(root.children):
             insert(root_iid, root.children[arc])
 
+        if self._search_var.get().strip():
+            self._find_matches()
+
     def _expand_all(self) -> None:
         self._set_descendants_open("", True)
 
@@ -497,6 +522,7 @@ class MibExplorerApp(tk.Tk):
         for tag in self._source_link_tags:
             self._details.tag_delete(tag)
         self._source_link_tags.clear()
+        self._clear_details_search_highlight()
 
         if not definitions:
             self._set_text(
@@ -504,6 +530,7 @@ class MibExplorerApp(tk.Tk):
                 f"Structural OID node\n\nNumeric OID: {node.oid_text}\n"
                 "No loaded MIB defines this exact node.",
             )
+            self._highlight_details_matches()
             return
 
         separator = "\n\n" + "─" * 48 + "\n\n"
@@ -560,8 +587,45 @@ class MibExplorerApp(tk.Tk):
                 "<Leave>",
                 lambda _event: self._details.configure(cursor=""),
             )
+        self._highlight_details_matches()
+
+    def _clear_details_search_highlight(self) -> None:
+        self._details.tag_remove(_SEARCH_MATCH_TAG, "1.0", "end")
+
+    def _highlight_details_matches(self) -> None:
+        self._clear_details_search_highlight()
+        needle = self._search_var.get().strip()
+        if not needle:
+            return
+
+        start = "1.0"
+        while True:
+            match = self._details.search(needle, start, stopindex="end", nocase=True)
+            if not match:
+                break
+            match_end = self._details.index(f"{match} + {len(needle)} chars")
+            self._details.tag_add(_SEARCH_MATCH_TAG, match, match_end)
+            start = match_end
+
+    def _clear_search_highlights(self) -> None:
+        for iid in self._search_highlight_iids:
+            tags = self._tree.item(iid, "tags")
+            self._tree.item(
+                iid,
+                tags=tuple(tag for tag in tags if tag != _SEARCH_MATCH_TAG),
+            )
+        self._search_highlight_iids.clear()
+
+    def _highlight_search_matches(self, iids: Iterable[str]) -> None:
+        for iid in iids:
+            tags = self._tree.item(iid, "tags")
+            if _SEARCH_MATCH_TAG not in tags:
+                self._tree.item(iid, tags=(*tags, _SEARCH_MATCH_TAG))
+            self._search_highlight_iids.add(iid)
 
     def _find_matches(self, _event: tk.Event | None = None) -> None:
+        self._clear_search_highlights()
+        self._clear_details_search_highlight()
         needle = self._search_var.get().strip().casefold()
         if not needle:
             self._search_matches = []
@@ -597,6 +661,7 @@ class MibExplorerApp(tk.Tk):
             self._status_var.set(f"No results for {self._search_var.get().strip()!r}.")
             return
 
+        self._highlight_search_matches(matches_by_item)
         self._next_button.configure(state="normal")
         self._prev_button.configure(state="normal")
         self._search_index = 0
