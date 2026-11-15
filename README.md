@@ -35,8 +35,6 @@ Directories are searched recursively. Without paths, choose one or more `.mib`/`
 
 Filenames should conventionally match their MIB module names (case-insensitive), as PySMI resolves source modules by module name. Parser/compiler warnings appear below the OID browser. Search matches names, descriptions, metadata, or numeric OIDs.
 
-Use the **Dark mode** button in the toolbar to switch between light and dark appearance.
-
 ## Tests
 
 ```sh

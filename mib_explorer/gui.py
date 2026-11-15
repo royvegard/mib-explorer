@@ -48,11 +48,6 @@ class MibExplorerApp(tk.Tk):
             self._start_loading(startup_paths)
 
     def _build_widgets(self) -> None:
-        self._style = ttk.Style(self)
-        self._style.theme_use("clam")
-        self._dark_mode = True
-        self._apply_theme()
-
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
 
@@ -79,8 +74,6 @@ class MibExplorerApp(tk.Tk):
         ttk.Button(toolbar, text="Collapse all", command=self._collapse_all).grid(
             row=0, column=7, padx=(6, 0)
         )
-        self._theme_button = ttk.Button(toolbar, text="Dark mode", command=self._toggle_theme)
-        self._theme_button.grid(row=0, column=8, padx=(12, 0))
 
         content = ttk.Panedwindow(self, orient="horizontal")
         content.grid(row=1, column=0, sticky="nsew", padx=8, pady=4)
@@ -88,6 +81,7 @@ class MibExplorerApp(tk.Tk):
         tree_frame = ttk.Frame(content, padding=(0, 0, 5, 0))
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
+        ttk.Style(self).configure("MibExplorer.Treeview", font="TkFixedFont")
         self._tree = ttk.Treeview(
             tree_frame,
             columns=("oid", "kind", "syntax"),
@@ -136,110 +130,6 @@ class MibExplorerApp(tk.Tk):
         self.rowconfigure(3, weight=0)
         self._set_text(self._details, "Select an OID node to inspect its MIB definitions.")
         self._refresh_warnings()
-        self._apply_theme()
-
-    def _toggle_theme(self) -> None:
-        self._dark_mode = not self._dark_mode
-        self._apply_theme()
-        self._theme_button.configure(text="Light mode" if self._dark_mode else "Dark mode")
-
-    def _apply_theme(self) -> None:
-        if self._dark_mode:
-            background, foreground = "#202124", "#e8eaed"
-            surface, field, border = "#292a2d", "#303134", "#5f6368"
-            selected, accent = "#3c5575", "#8ab4f8"
-        else:
-            background, foreground = "#f0f0f0", "#202124"
-            surface, field, border = "#ffffff", "#ffffff", "#b8b8b8"
-            selected, accent = "#cfe2f3", "#1a73e8"
-
-        self.configure(background=background)
-        self._style.configure(".", background=background, foreground=foreground)
-        self._style.configure("TFrame", background=background)
-        self._style.configure("TLabel", background=background, foreground=foreground)
-        self._style.configure(
-            "TLabelFrame", background=background, foreground=foreground, bordercolor=border
-        )
-        self._style.configure("TLabelFrame.Label", background=background, foreground=foreground)
-        self._style.configure(
-            "TButton", background=surface, foreground=foreground, bordercolor=border
-        )
-        self._style.map(
-            "TButton",
-            background=[("active", selected), ("disabled", background)],
-            foreground=[("disabled", border)],
-            bordercolor=[("focus", accent), ("alternate", "#000000")],
-        )
-        self._style.configure(
-            "TEntry",
-            fieldbackground=field,
-            foreground=foreground,
-            insertcolor=foreground,
-            bordercolor=border,
-        )
-        self._style.map(
-            "TEntry",
-            bordercolor=[("focus", accent)],
-            lightcolor=[("focus", accent)],
-        )
-        self._style.configure(
-            "Treeview",
-            background=field,
-            fieldbackground=field,
-            foreground=foreground,
-            rowheight=22,
-        )
-        self._style.map(
-            "Treeview",
-            background=[("selected", selected)],
-            foreground=[("selected", foreground)],
-            bordercolor=[("focus", accent)],
-        )
-        self._style.configure(
-            "Treeview.Heading", background=surface, foreground=foreground, bordercolor=border
-        )
-        self._style.map("Treeview.Heading", background=[("active", selected)])
-        self._style.configure(
-            "MibExplorer.Treeview",
-            background=field,
-            fieldbackground=field,
-            foreground=foreground,
-            rowheight=22,
-            font="TkFixedFont",
-        )
-        self._style.map(
-            "MibExplorer.Treeview",
-            background=[("selected", selected)],
-            foreground=[("selected", foreground)],
-            bordercolor=[("focus", accent)],
-        )
-        self._style.configure(
-            "Vertical.TScrollbar",
-            background=surface,
-            troughcolor=background,
-            bordercolor=border,
-            arrowcolor=foreground,
-        )
-        self._style.configure(
-            "Horizontal.TScrollbar",
-            background=surface,
-            troughcolor=background,
-            bordercolor=border,
-            arrowcolor=foreground,
-        )
-
-        for widget_name in ("_details", "_warning_text"):
-            widget = getattr(self, widget_name, None)
-            if widget is not None:
-                widget.configure(
-                    background=field,
-                    foreground=foreground,
-                    insertbackground=foreground,
-                    selectbackground=selected,
-                    selectforeground=foreground,
-                )
-        if hasattr(self, "_theme_button"):
-            self._theme_button.configure(text="Light mode" if self._dark_mode else "Dark mode")
 
     def _choose_files(self) -> None:
         paths = filedialog.askopenfilenames(
