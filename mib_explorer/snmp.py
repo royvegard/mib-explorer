@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
+
+from .model import OidDefinition, parse_oid
 
 
 class _Printable(Protocol):
@@ -18,13 +21,72 @@ class SnmpValue:
     value: str
 
 
+def format_timeticks(ticks: int) -> str:
+    if ticks < 0:
+        raise ValueError("TimeTicks cannot be negative")
+
+    days, remainder = divmod(ticks, 8_640_000)
+    hours, remainder = divmod(remainder, 360_000)
+    minutes, remainder = divmod(remainder, 6_000)
+    seconds, centiseconds = divmod(remainder, 100)
+    seconds_text = f"{seconds}.{centiseconds:02d}"
+    seconds_unit = "second" if seconds == 1 and centiseconds == 0 else "seconds"
+    return (
+        f"{days} {'day' if days == 1 else 'days'} "
+        f"{hours} {'hour' if hours == 1 else 'hours'} "
+        f"{minutes} {'minute' if minutes == 1 else 'minutes'} "
+        f"{seconds_text} {seconds_unit}"
+    )
+
+
 def _format_var_bind(name: _Printable, value: _Printable) -> SnmpValue:
     numeric_oid = name.prettyPrint().lstrip(".")
+    syntax = type(value).__name__
+    formatted_value = value.prettyPrint()
+    if syntax.casefold() == "timeticks":
+        try:
+            formatted_value = format_timeticks(int(formatted_value))
+        except ValueError:
+            pass
+
     return SnmpValue(
         oid=f".{numeric_oid}",
-        syntax=type(value).__name__,
-        value=value.prettyPrint(),
+        syntax=syntax,
+        value=formatted_value,
     )
+
+
+def build_table_rows(
+    values: Iterable[SnmpValue],
+    columns: Sequence[OidDefinition],
+) -> list[tuple[str, ...]]:
+    ordered_columns = tuple(sorted(columns, key=lambda definition: definition.oid))
+    cells_by_index: dict[tuple[int, ...], dict[tuple[int, ...], str]] = {}
+
+    for value in values:
+        try:
+            value_oid = parse_oid(value.oid)
+        except ValueError:
+            continue
+
+        matching_columns = [
+            definition
+            for definition in ordered_columns
+            if len(value_oid) > len(definition.oid)
+            and value_oid[: len(definition.oid)] == definition.oid
+        ]
+        if not matching_columns:
+            continue
+
+        column = max(matching_columns, key=lambda definition: len(definition.oid))
+        row_index = value_oid[len(column.oid) :]
+        cells_by_index.setdefault(row_index, {})[column.oid] = value.value
+
+    rows = []
+    for row_index, cells in sorted(cells_by_index.items()):
+        index_text = ".".join(str(arc) for arc in row_index)
+        rows.append((index_text, *(cells.get(column.oid, "") for column in ordered_columns)))
+    return rows
 
 
 def parse_target_settings(host: str, port_text: str, community: str) -> tuple[str, int, str]:

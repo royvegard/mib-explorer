@@ -10,12 +10,13 @@ import sys
 import threading
 import tkinter as tk
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .model import OidDefinition, OidNode, build_oid_tree, parse_oid
 from .parser import ParseResult, load_mibs
-from .snmp import SnmpValue, get_subtree, parse_target_settings
+from .snmp import SnmpValue, build_table_rows, get_subtree, parse_target_settings
 
 
 def _single_child_chain(node: OidNode) -> tuple[OidNode, ...]:
@@ -23,6 +24,21 @@ def _single_child_chain(node: OidNode) -> tuple[OidNode, ...]:
     while len(chain[-1].children) == 1:
         chain.append(next(iter(chain[-1].children.values())))
     return tuple(chain)
+
+
+@dataclass(slots=True)
+class _SnmpResultsView:
+    tab: ttk.Frame
+    tree: ttk.Treeview
+    status_var: tk.StringVar
+    host: str
+    port: int
+    community: str
+    oid: tuple[int, ...]
+    table_columns: tuple[OidDefinition, ...] | None = None
+    update_button: ttk.Button | None = None
+    loading: bool = False
+    started: bool = False
 
 
 _DARK_THEME = "dark"
@@ -38,6 +54,8 @@ _DARK_COLORS = {
     "active": "#414B59",
     "selection": "#375A7F",
     "accent": "#477CA8",
+    "tab_selected": "#465668",
+    "tab_hover": "#3D4856",
 }
 
 
@@ -100,6 +118,31 @@ def _register_dark_theme(style: ttk.Style) -> None:
                         ("pressed", colors["accent"]),
                         ("active", colors["active"]),
                     ]
+                },
+            },
+            "TNotebook": {
+                "configure": {
+                    "background": colors["background"],
+                    "bordercolor": colors["border"],
+                    "tabmargins": (4, 4, 0, 0),
+                }
+            },
+            "TNotebook.Tab": {
+                "configure": {
+                    "background": colors["surface"],
+                    "foreground": colors["muted"],
+                    "bordercolor": colors["border"],
+                    "padding": (10, 1),
+                },
+                "map": {
+                    "background": [
+                        ("selected", colors["tab_selected"]),
+                        ("active", colors["tab_hover"]),
+                    ],
+                    "foreground": [
+                        ("selected", colors["foreground"]),
+                        ("active", colors["foreground"]),
+                    ],
                 },
             },
             "TEntry": {
@@ -193,7 +236,7 @@ class MibExplorerApp(tk.Tk):
         self._source_link_tags: list[str] = []
         self._results: queue.Queue[tuple[ParseResult | None, Exception | None]] = queue.Queue()
         self._snmp_results: queue.Queue[tuple[int, list[SnmpValue] | None, str | None]] = queue.Queue()
-        self._snmp_views: dict[int, tuple[ttk.Frame, ttk.Treeview, tk.StringVar]] = {}
+        self._snmp_views: dict[int, _SnmpResultsView] = {}
         self._next_snmp_request_id = 0
 
         self._build_widgets()
@@ -313,7 +356,6 @@ class MibExplorerApp(tk.Tk):
         self._tree.bind("<Shift-Return>", self._previous_match)
         self._tree.bind("<Shift-N>", self._previous_match)
         self._tree_context_menu = tk.Menu(self._tree, tearoff=False)
-        self._tree_context_menu.add_command(label="Get subtree", command=self._get_selected_subtree)
         self._tree.bind("<Button-3>", self._show_tree_context_menu)
         content.add(tree_frame, weight=3)
 
@@ -437,16 +479,53 @@ class MibExplorerApp(tk.Tk):
         self._tree.selection_set(iid)
         self._tree.focus(iid)
         oid = self._oid_by_iid.get(iid)
-        self._tree_context_menu.entryconfigure(
-            "Get subtree",
+        self._tree_context_menu.delete(0, "end")
+        self._tree_context_menu.add_command(
+            label="Get subtree",
+            command=self._get_selected_subtree,
             state="normal" if oid else "disabled",
         )
-        try:
-            self._tree_context_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self._tree_context_menu.grab_release()
+        if self._table_definition_for_iid(iid) is not None:
+            self._tree_context_menu.add_command(
+                label="Get table",
+                command=self._get_selected_table,
+            )
+        self._tree_context_menu.tk_popup(event.x_root, event.y_root)
         return "break"
 
+
+    @staticmethod
+    def _kind_is(definition: OidDefinition, *expected_kinds: str) -> bool:
+        kind = "".join(character for character in definition.kind.casefold() if character.isalnum())
+        return kind in expected_kinds
+
+    def _table_definition_for_iid(self, iid: str) -> OidDefinition | None:
+        return next(
+            (
+                definition
+                for definition in self._definitions_by_iid.get(iid, ())
+                if self._kind_is(definition, "table", "mibtable")
+            ),
+            None,
+        )
+
+    def _table_column_definitions(self, table_definition: OidDefinition) -> tuple[OidDefinition, ...]:
+        definitions = tuple(self._definitions.values())
+        row_oids = [
+            definition.oid
+            for definition in definitions
+            if self._kind_is(definition, "row", "tablerow", "mibtablerow")
+            and definition.oid[: len(table_definition.oid)] == table_definition.oid
+        ]
+        row_oid = min(row_oids, key=len) if row_oids else table_definition.oid
+        columns_by_oid: dict[tuple[int, ...], OidDefinition] = {}
+        for definition in sorted(definitions, key=lambda item: (item.oid, item.module, item.name)):
+            if (
+                self._kind_is(definition, "column", "tablecolumn", "mibtablecolumn")
+                and definition.oid[: len(row_oid)] == row_oid
+            ):
+                columns_by_oid.setdefault(definition.oid, definition)
+        return tuple(columns_by_oid.values())
 
     def _get_selected_subtree(self) -> None:
         selection = self._tree.selection()
@@ -468,38 +547,80 @@ class MibExplorerApp(tk.Tk):
 
         self._open_snmp_results_tab(host, port, community, oid)
 
+    def _get_selected_table(self) -> None:
+        selection = self._tree.selection()
+        if not selection:
+            return
+        table_definition = self._table_definition_for_iid(selection[0])
+        if table_definition is None:
+            return
+
+        try:
+            host, port, community = parse_target_settings(
+                self._snmp_host_var.get(),
+                self._snmp_port_var.get(),
+                self._snmp_community_var.get(),
+            )
+        except ValueError as exc:
+            messagebox.showerror("Invalid SNMP target", str(exc), parent=self)
+            return
+
+        self._open_snmp_results_tab(
+            host,
+            port,
+            community,
+            table_definition.oid,
+            table_columns=self._table_column_definitions(table_definition),
+        )
+
     def _open_snmp_results_tab(
         self,
         host: str,
         port: int,
         community: str,
         oid: tuple[int, ...],
+        table_columns: tuple[OidDefinition, ...] | None = None,
     ) -> None:
         oid_text = "." + ".".join(str(arc) for arc in oid)
         result_tab = ttk.Frame(self._notebook, padding=8)
         result_tab.rowconfigure(0, weight=1)
         result_tab.columnconfigure(0, weight=1)
-        self._notebook.add(result_tab, text=f"{host} {oid_text}")
+        tab_label = f"{host} - {self._oid_name_for_text(oid_text)}"
+        self._notebook.add(result_tab, text=tab_label)
         self._notebook.select(result_tab)
 
         table_frame = ttk.Frame(result_tab)
         table_frame.grid(row=0, column=0, sticky="nsew")
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
-        tree = ttk.Treeview(
-            table_frame,
-            columns=("name", "oid", "syntax", "value"),
-            show="headings",
-            selectmode="browse",
-        )
-        tree.heading("name", text="OID name")
-        tree.heading("oid", text="Numeric OID")
-        tree.heading("syntax", text="Type")
-        tree.heading("value", text="Value")
-        tree.column("name", width=220, minwidth=140, stretch=False)
-        tree.column("oid", width=230, minwidth=150, stretch=False)
-        tree.column("syntax", width=130, minwidth=90, stretch=False)
-        tree.column("value", width=520, minwidth=200, stretch=True)
+        if table_columns:
+            column_ids = ("index", *(f"column_{index}" for index in range(len(table_columns))))
+            tree = ttk.Treeview(
+                table_frame,
+                columns=column_ids,
+                show="headings",
+                selectmode="browse",
+            )
+            tree.heading("index", text="Index")
+            tree.column("index", width=140, minwidth=100, stretch=False)
+            for column_id, definition in zip(column_ids[1:], table_columns):
+                tree.heading(column_id, text=definition.name)
+                tree.column(column_id, width=160, minwidth=100, stretch=False)
+        else:
+            tree = ttk.Treeview(
+                table_frame,
+                columns=("name", "oid", "syntax", "value"),
+                show="headings",
+                selectmode="browse",
+            )
+            tree.heading("name", text="OID name")
+            tree.heading("oid", text="Numeric OID")
+            tree.heading("syntax", text="Type")
+            tree.heading("value", text="Value")
+            tree.column("name", width=220, minwidth=140, stretch=False)
+            tree.column("oid", width=230, minwidth=150, stretch=False)
+            tree.column("syntax", width=130, minwidth=90, stretch=False)
+            tree.column("value", width=520, minwidth=200, stretch=True)
         vertical = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
         horizontal = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
@@ -507,8 +628,9 @@ class MibExplorerApp(tk.Tk):
         vertical.grid(row=0, column=1, sticky="ns")
         horizontal.grid(row=1, column=0, sticky="ew")
 
+        request_kind = "table" if table_columns is not None else "subtree"
         status_var = tk.StringVar(
-            value=f"Reading {oid_text} from {host}:{port} with SNMPv2c…"
+            value=f"Reading {request_kind} {oid_text} from {host}:{port} with SNMPv2c…"
         )
         footer = ttk.Frame(result_tab)
         footer.grid(row=1, column=0, sticky="ew", pady=(8, 0))
@@ -519,15 +641,47 @@ class MibExplorerApp(tk.Tk):
 
         self._next_snmp_request_id += 1
         request_id = self._next_snmp_request_id
-        self._snmp_views[request_id] = (result_tab, tree, status_var)
+        view = _SnmpResultsView(
+            result_tab,
+            tree,
+            status_var,
+            host,
+            port,
+            community,
+            oid,
+            table_columns,
+        )
+        self._snmp_views[request_id] = view
+        view.update_button = ttk.Button(
+            footer,
+            text="Update values",
+            command=lambda: self._start_snmp_request(request_id),
+        )
+        view.update_button.grid(row=0, column=1, padx=(0, 6), sticky="e")
         ttk.Button(
             footer,
             text="Close tab",
             command=lambda: self._close_snmp_tab(request_id),
-        ).grid(row=0, column=1, sticky="e")
+        ).grid(row=0, column=2, sticky="e")
+        self._start_snmp_request(request_id)
+
+    def _start_snmp_request(self, request_id: int) -> None:
+        view = self._snmp_views.get(request_id)
+        if view is None or view.loading or view.update_button is None:
+            return
+
+        request_kind = "table" if view.table_columns is not None else "subtree"
+        action = "Updating" if view.started else "Reading"
+        oid_text = "." + ".".join(str(arc) for arc in view.oid)
+        view.status_var.set(
+            f"{action} {request_kind} {oid_text} from {view.host}:{view.port} with SNMPv2c…"
+        )
+        view.started = True
+        view.loading = True
+        view.update_button.configure(state="disabled")
         worker = threading.Thread(
             target=self._get_subtree_in_background,
-            args=(request_id, host, port, community, oid),
+            args=(request_id, view.host, view.port, view.community, view.oid),
             daemon=True,
         )
         worker.start()
@@ -572,12 +726,33 @@ class MibExplorerApp(tk.Tk):
             view = self._snmp_views.get(request_id)
             if view is None:
                 continue
-            _window, tree, status_var = view
+            view.loading = False
+            if view.update_button is not None:
+                view.update_button.configure(state="normal")
             if error is not None:
-                status_var.set(f"SNMP walk failed: {error}")
-            elif values:
+                view.status_var.set(f"SNMP walk failed: {error}")
+                continue
+
+            existing_rows = view.tree.get_children("")
+            if existing_rows:
+                view.tree.delete(*existing_rows)
+            if not values:
+                view.status_var.set("No descendant OIDs were returned by the agent.")
+                continue
+
+            if view.table_columns:
+                rows = build_table_rows(values, view.table_columns)
+                for row in rows:
+                    view.tree.insert("", "end", values=row)
+                if rows:
+                    view.status_var.set(
+                        f"Received {len(rows)} table row(s) from {len(values)} value(s)."
+                    )
+                else:
+                    view.status_var.set("No table rows matched the loaded column definitions.")
+            else:
                 for value in values:
-                    tree.insert(
+                    view.tree.insert(
                         "",
                         "end",
                         values=(
@@ -587,15 +762,19 @@ class MibExplorerApp(tk.Tk):
                             value.value,
                         ),
                     )
-                status_var.set(f"Received {len(values)} value(s).")
-            else:
-                status_var.set("No descendant OIDs were returned by the agent.")
+                if view.table_columns is not None:
+                    view.status_var.set(
+                        f"Received {len(values)} value(s); no table-column definitions "
+                        "were loaded, so raw OIDs are shown."
+                    )
+                else:
+                    view.status_var.set(f"Received {len(values)} value(s).")
 
     def _close_snmp_tab(self, request_id: int) -> None:
         view = self._snmp_views.pop(request_id, None)
         if view is not None:
-            self._notebook.forget(view[0])
-            view[0].destroy()
+            self._notebook.forget(view.tab)
+            view.tab.destroy()
 
     def _start_loading(self, paths: Sequence[str | Path]) -> None:
         if self._loading:

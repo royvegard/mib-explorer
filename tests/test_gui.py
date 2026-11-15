@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import queue
 import re
 import unittest
+from types import SimpleNamespace
 from typing import Any, cast
 
 from mib_explorer.gui import MibExplorerApp
 from mib_explorer.model import OidDefinition, OidNode
+from mib_explorer.snmp import SnmpValue
 
 
 class FakeTree:
@@ -60,6 +63,28 @@ class RecordingTree:
         if option is not None:
             return self.items[iid].get(option, ())
         return self.items[iid]
+
+
+class FakeResultTree:
+    def __init__(self, rows: list[tuple[str, ...]]) -> None:
+        self.rows = rows
+
+    def get_children(self, _parent: str) -> list[int]:
+        return list(range(len(self.rows)))
+
+    def delete(self, *_items: int) -> None:
+        self.rows.clear()
+
+    def insert(self, _parent: str, _index: str, *, values: tuple[str, ...]) -> None:
+        self.rows.append(values)
+
+
+class FakeStateButton:
+    def __init__(self) -> None:
+        self.state = "disabled"
+
+    def configure(self, *, state: str) -> None:
+        self.state = state
 
 
 class FakeDetails:
@@ -129,6 +154,44 @@ class OidNameHarness:
         self._nodes_by_oid = {oid: OidNode(oid, definitions=[definition])}
 
 
+class SnmpResultsPollingHarness:
+    _poll_snmp_results = MibExplorerApp._poll_snmp_results
+    _oid_name_for_text = MibExplorerApp._oid_name_for_text
+
+    def __init__(self, rows: list[tuple[str, ...]]) -> None:
+        self._snmp_results: queue.Queue[tuple[int, list[SnmpValue] | None, str | None]] = (
+            queue.Queue()
+        )
+        self._nodes_by_oid = {}
+        self.tree = FakeResultTree(rows)
+        self.button = FakeStateButton()
+        self.view = SimpleNamespace(
+            tree=self.tree,
+            status_var=FakeVariable(""),
+            loading=True,
+            update_button=self.button,
+            table_columns=None,
+        )
+        self._snmp_views = {1: self.view}
+
+
+class TableDefinitionHarness:
+    _kind_is = staticmethod(MibExplorerApp._kind_is)
+    _table_definition_for_iid = MibExplorerApp._table_definition_for_iid
+    _table_column_definitions = MibExplorerApp._table_column_definitions
+
+    def __init__(self) -> None:
+        self.table = OidDefinition("sampleTable", (1, 3, 6, 1, 4, 1, 999, 1), "TEST-MIB", kind="table")
+        row = OidDefinition("sampleEntry", (*self.table.oid, 1), "TEST-MIB", kind="row")
+        index = OidDefinition("sampleIndex", (*row.oid, 1), "TEST-MIB", kind="column")
+        value = OidDefinition("sampleValue", (*row.oid, 2), "TEST-MIB", kind="column")
+        self._definitions_by_iid = {"table": (self.table,), "row": (row,)}
+        self._definitions = {
+            (definition.module, definition.name, definition.oid): definition
+            for definition in (self.table, row, index, value)
+        }
+
+
 class TreeRebuildHarness:
     _rebuild_tree = MibExplorerApp._rebuild_tree
     _clear_search_highlights = MibExplorerApp._clear_search_highlights
@@ -193,6 +256,41 @@ class TreeControlTests(unittest.TestCase):
         app = OidNameHarness()
 
         self.assertEqual(app._oid_name_for_text(".1.3.6.1.99"), ".1.3.6.1.99")
+
+    def test_table_definition_is_recognized_but_table_row_is_not(self) -> None:
+        app = TableDefinitionHarness()
+
+        self.assertIs(app._table_definition_for_iid("table"), app.table)
+        self.assertIsNone(app._table_definition_for_iid("row"))
+
+    def test_snmp_refresh_replaces_existing_result_rows(self) -> None:
+        app = SnmpResultsPollingHarness([("old", "old")])
+        app._snmp_results.put((1, [SnmpValue(".1.3.6", "Integer32", "42")], None))
+
+        app._poll_snmp_results()
+
+        self.assertEqual(app.tree.rows, [(".1.3.6", ".1.3.6", "Integer32", "42")])
+        self.assertEqual(app.view.status_var.value, "Received 1 value(s).")
+        self.assertEqual(app.button.state, "normal")
+        self.assertFalse(app.view.loading)
+
+    def test_snmp_refresh_error_keeps_existing_result_rows(self) -> None:
+        app = SnmpResultsPollingHarness([("old", "row")])
+        app._snmp_results.put((1, None, "timed out"))
+
+        app._poll_snmp_results()
+
+        self.assertEqual(app.tree.rows, [("old", "row")])
+        self.assertEqual(app.view.status_var.value, "SNMP walk failed: timed out")
+        self.assertEqual(app.button.state, "normal")
+        self.assertFalse(app.view.loading)
+
+    def test_table_column_definitions_are_collected_under_row_oid(self) -> None:
+        app = TableDefinitionHarness()
+
+        columns = app._table_column_definitions(app.table)
+
+        self.assertEqual([definition.name for definition in columns], ["sampleIndex", "sampleValue"])
 
     def test_expand_all_opens_every_tree_item(self) -> None:
         app = TreeControlHarness()
