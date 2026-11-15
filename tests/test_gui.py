@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import queue
 import re
+import threading
 import unittest
 from types import SimpleNamespace
 from typing import Any, cast
 
-from mib_explorer.gui import MibExplorerApp
+from mib_explorer.gui import (
+    MibExplorerApp,
+    _SnmpResultsBatch,
+    _SnmpResultsComplete,
+    _SnmpResultsFailure,
+)
 from mib_explorer.model import OidDefinition, OidNode
 from mib_explorer.snmp import SnmpValue
 
@@ -75,16 +81,36 @@ class FakeResultTree:
     def delete(self, *_items: int) -> None:
         self.rows.clear()
 
-    def insert(self, _parent: str, _index: str, *, values: tuple[str, ...]) -> None:
+    def insert(self, _parent: str, _index: str, *, values: tuple[str, ...]) -> str:
         self.rows.append(values)
+        return str(len(self.rows) - 1)
+
+    def item(self, iid: str, *, values: tuple[str, ...]) -> None:
+        self.rows[int(iid)] = values
 
 
 class FakeStateButton:
-    def __init__(self) -> None:
-        self.state = "disabled"
+    def __init__(self, state: str = "disabled") -> None:
+        self.state = state
 
     def configure(self, *, state: str) -> None:
         self.state = state
+
+
+class FakeTab:
+    def __init__(self) -> None:
+        self.destroyed = False
+
+    def destroy(self) -> None:
+        self.destroyed = True
+
+
+class FakeNotebook:
+    def __init__(self) -> None:
+        self.forgotten: list[FakeTab] = []
+
+    def forget(self, tab: FakeTab) -> None:
+        self.forgotten.append(tab)
 
 
 class FakeDetails:
@@ -156,21 +182,35 @@ class OidNameHarness:
 
 class SnmpResultsPollingHarness:
     _poll_snmp_results = MibExplorerApp._poll_snmp_results
+    _abort_snmp_request = MibExplorerApp._abort_snmp_request
+    _close_snmp_tab = MibExplorerApp._close_snmp_tab
+    _append_snmp_values = MibExplorerApp._append_snmp_values
+    _finish_snmp_results = staticmethod(MibExplorerApp._finish_snmp_results)
     _oid_name_for_text = MibExplorerApp._oid_name_for_text
+    _clear_snmp_result_view = staticmethod(MibExplorerApp._clear_snmp_result_view)
 
     def __init__(self, rows: list[tuple[str, ...]]) -> None:
-        self._snmp_results: queue.Queue[tuple[int, list[SnmpValue] | None, str | None]] = (
-            queue.Queue()
-        )
+        self._snmp_results: queue.Queue[
+            _SnmpResultsBatch | _SnmpResultsComplete | _SnmpResultsFailure
+        ] = queue.Queue()
         self._nodes_by_oid = {}
         self.tree = FakeResultTree(rows)
         self.button = FakeStateButton()
+        self.abort_button = FakeStateButton("normal")
+        self.tab = FakeTab()
+        self._notebook = FakeNotebook()
         self.view = SimpleNamespace(
             tree=self.tree,
             status_var=FakeVariable(""),
             loading=True,
             update_button=self.button,
+            abort_button=self.abort_button,
+            cancel_event=threading.Event(),
+            tab=self.tab,
             table_columns=None,
+            received_count=0,
+            table_row_iids={},
+            table_row_cells={},
         )
         self._snmp_views = {1: self.view}
 
@@ -263,27 +303,102 @@ class TreeControlTests(unittest.TestCase):
         self.assertIs(app._table_definition_for_iid("table"), app.table)
         self.assertIsNone(app._table_definition_for_iid("row"))
 
-    def test_snmp_refresh_replaces_existing_result_rows(self) -> None:
+    def test_snmp_refresh_populates_rows_as_batches_arrive(self) -> None:
         app = SnmpResultsPollingHarness([("old", "old")])
-        app._snmp_results.put((1, [SnmpValue(".1.3.6", "Integer32", "42")], None))
+        app._clear_snmp_result_view(cast(Any, app.view))
+        app._snmp_results.put(
+            _SnmpResultsBatch(1, (SnmpValue(".1.3.6", "Integer32", "42"),))
+        )
 
         app._poll_snmp_results()
 
         self.assertEqual(app.tree.rows, [(".1.3.6", ".1.3.6", "Integer32", "42")])
+        self.assertEqual(app.view.status_var.value, "Received 1 value(s)…")
+        self.assertTrue(app.view.loading)
+
+        app._snmp_results.put(_SnmpResultsComplete(1, 1))
+        app._poll_snmp_results()
+
         self.assertEqual(app.view.status_var.value, "Received 1 value(s).")
         self.assertEqual(app.button.state, "normal")
+        self.assertEqual(app.abort_button.state, "disabled")
         self.assertFalse(app.view.loading)
 
-    def test_snmp_refresh_error_keeps_existing_result_rows(self) -> None:
-        app = SnmpResultsPollingHarness([("old", "row")])
-        app._snmp_results.put((1, None, "timed out"))
+    def test_snmp_abort_keeps_fetched_rows_and_reports_aborted_state(self) -> None:
+        app = SnmpResultsPollingHarness([])
+        app._snmp_results.put(
+            _SnmpResultsBatch(1, (SnmpValue(".1.3.6", "Integer32", "42"),))
+        )
+        app._snmp_results.put(_SnmpResultsComplete(1, 1, aborted=True))
 
         app._poll_snmp_results()
 
-        self.assertEqual(app.tree.rows, [("old", "row")])
+        self.assertEqual(app.tree.rows, [(".1.3.6", ".1.3.6", "Integer32", "42")])
+        self.assertEqual(app.view.status_var.value, "Read aborted after 1 value(s).")
+        self.assertEqual(app.button.state, "normal")
+        self.assertEqual(app.abort_button.state, "disabled")
+        self.assertFalse(app.view.loading)
+
+    def test_abort_button_signals_cancellation(self) -> None:
+        app = SnmpResultsPollingHarness([])
+
+        app._abort_snmp_request(1)
+
+        self.assertTrue(app.view.cancel_event.is_set())
+        self.assertEqual(app.abort_button.state, "disabled")
+        self.assertEqual(
+            app.view.status_var.value,
+            "Aborting SNMP walk; keeping fetched values…",
+        )
+
+    def test_closing_tab_cancels_read_and_discards_queued_values(self) -> None:
+        app = SnmpResultsPollingHarness([])
+        app._snmp_results.put(
+            _SnmpResultsBatch(1, (SnmpValue(".1.3.6", "Integer32", "42"),))
+        )
+
+        app._close_snmp_tab(1)
+        app._poll_snmp_results()
+
+        self.assertTrue(app.view.cancel_event.is_set())
+        self.assertTrue(app.tab.destroyed)
+        self.assertEqual(app._notebook.forgotten, [app.tab])
+        self.assertEqual(app.tree.rows, [])
+
+    def test_snmp_refresh_error_keeps_partial_results(self) -> None:
+        app = SnmpResultsPollingHarness([("old", "row")])
+        app._clear_snmp_result_view(cast(Any, app.view))
+        app._snmp_results.put(
+            _SnmpResultsBatch(1, (SnmpValue(".1.3.6", "Integer32", "42"),))
+        )
+        app._snmp_results.put(_SnmpResultsFailure(1, "timed out"))
+
+        app._poll_snmp_results()
+
+        self.assertEqual(app.tree.rows, [(".1.3.6", ".1.3.6", "Integer32", "42")])
         self.assertEqual(app.view.status_var.value, "SNMP walk failed: timed out")
         self.assertEqual(app.button.state, "normal")
         self.assertFalse(app.view.loading)
+
+    def test_table_batches_fill_the_same_row_incrementally(self) -> None:
+        app = SnmpResultsPollingHarness([])
+        column_index = OidDefinition("sampleIndex", (1, 3, 6, 1), "TEST-MIB")
+        column_value = OidDefinition("sampleValue", (1, 3, 6, 2), "TEST-MIB")
+        app.view.table_columns = (column_index, column_value)
+        app._snmp_results.put(
+            _SnmpResultsBatch(1, (SnmpValue(".1.3.6.1.7", "Integer32", "7"),))
+        )
+
+        app._poll_snmp_results()
+        self.assertEqual(app.tree.rows, [("7", "7", "")])
+
+        app._snmp_results.put(
+            _SnmpResultsBatch(1, (SnmpValue(".1.3.6.2.7", "OctetString", "ready"),))
+        )
+        app._poll_snmp_results()
+
+        self.assertEqual(app.tree.rows, [("7", "7", "ready")])
+        self.assertEqual(app.view.table_row_iids, {(7,): "0"})
 
     def test_table_column_definitions_are_collected_under_row_oid(self) -> None:
         app = TableDefinitionHarness()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 
 from mib_explorer.model import OidDefinition
@@ -9,6 +10,7 @@ from mib_explorer.snmp import (
     build_table_rows,
     format_timeticks,
     parse_target_settings,
+    walk_subtree,
 )
 
 
@@ -29,6 +31,24 @@ class TimeTicks:
 
 
 class SnmpTargetSettingsTests(unittest.TestCase):
+    def test_walk_can_be_cancelled_before_starting(self) -> None:
+        cancel_event = threading.Event()
+        cancel_event.set()
+        batches = []
+
+        result = walk_subtree(
+            "agent.example",
+            161,
+            "public",
+            (1, 3, 6),
+            batches.append,
+            cancel_event=cancel_event,
+        )
+
+        self.assertTrue(result.aborted)
+        self.assertEqual(result.count, 0)
+        self.assertEqual(batches, [])
+
     def test_strips_host_and_parses_port(self) -> None:
         self.assertEqual(
             parse_target_settings("  agent.example  ", " 1161 ", "private"),

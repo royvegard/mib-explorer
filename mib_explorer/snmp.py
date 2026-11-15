@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Sequence
+import threading
+from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -19,6 +20,12 @@ class SnmpValue:
     oid: str
     syntax: str
     value: str
+
+
+@dataclass(frozen=True, slots=True)
+class SnmpWalkResult:
+    count: int
+    aborted: bool
 
 
 def format_timeticks(ticks: int) -> str:
@@ -56,6 +63,28 @@ def _format_var_bind(name: _Printable, value: _Printable) -> SnmpValue:
     )
 
 
+def table_cell_for_value(
+    value: SnmpValue,
+    columns: Sequence[OidDefinition],
+) -> tuple[tuple[int, ...], tuple[int, ...], str] | None:
+    try:
+        value_oid = parse_oid(value.oid)
+    except ValueError:
+        return None
+
+    matching_columns = [
+        definition
+        for definition in columns
+        if len(value_oid) > len(definition.oid)
+        and value_oid[: len(definition.oid)] == definition.oid
+    ]
+    if not matching_columns:
+        return None
+
+    column = max(matching_columns, key=lambda definition: len(definition.oid))
+    return value_oid[len(column.oid) :], column.oid, value.value
+
+
 def build_table_rows(
     values: Iterable[SnmpValue],
     columns: Sequence[OidDefinition],
@@ -64,23 +93,11 @@ def build_table_rows(
     cells_by_index: dict[tuple[int, ...], dict[tuple[int, ...], str]] = {}
 
     for value in values:
-        try:
-            value_oid = parse_oid(value.oid)
-        except ValueError:
+        cell = table_cell_for_value(value, ordered_columns)
+        if cell is None:
             continue
-
-        matching_columns = [
-            definition
-            for definition in ordered_columns
-            if len(value_oid) > len(definition.oid)
-            and value_oid[: len(definition.oid)] == definition.oid
-        ]
-        if not matching_columns:
-            continue
-
-        column = max(matching_columns, key=lambda definition: len(definition.oid))
-        row_index = value_oid[len(column.oid) :]
-        cells_by_index.setdefault(row_index, {})[column.oid] = value.value
+        row_index, column_oid, cell_value = cell
+        cells_by_index.setdefault(row_index, {})[column_oid] = cell_value
 
     rows = []
     for row_index, cells in sorted(cells_by_index.items()):
@@ -106,12 +123,14 @@ def parse_target_settings(host: str, port_text: str, community: str) -> tuple[st
     return host, port, community
 
 
-async def _walk_subtree(
+async def _walk_subtree_batches(
     host: str,
     port: int,
     community: str,
     oid: tuple[int, ...],
-) -> list[SnmpValue]:
+    batch_size: int,
+    cancel_event: threading.Event | None = None,
+) -> AsyncIterator[tuple[SnmpValue, ...] | None]:
     try:
         from pysnmp.hlapi.v3arch.asyncio import (
             CommunityData,
@@ -128,12 +147,17 @@ async def _walk_subtree(
             "`python -m pip install -r requirements.txt`."
         ) from exc
 
+    if cancel_event is not None and cancel_event.is_set():
+        yield None
+        return
+
     target = await UdpTransportTarget.create((host, port), timeout=2, retries=1)
     engine = SnmpEngine()
-    results: list[SnmpValue] = []
+    pending: list[SnmpValue] = []
     numeric_oid = ".".join(str(arc) for arc in oid)
+    walk_iterator = None
     try:
-        async for indication, status, index, var_binds in walk_cmd(
+        walk_iterator = walk_cmd(
             engine,
             CommunityData(community, mpModel=1),
             target,
@@ -141,15 +165,66 @@ async def _walk_subtree(
             ObjectType(ObjectIdentity(numeric_oid)),
             lexicographicMode=False,
             lookupMib=False,
-        ):
+        ).__aiter__()
+        while True:
+            if cancel_event is None:
+                try:
+                    response = await walk_iterator.__anext__()
+                except StopAsyncIteration:
+                    break
+            else:
+                next_response = asyncio.ensure_future(walk_iterator.__anext__())
+                while not next_response.done():
+                    if cancel_event.is_set():
+                        next_response.cancel()
+                        await asyncio.gather(next_response, return_exceptions=True)
+                        if pending:
+                            yield tuple(pending)
+                            pending.clear()
+                        yield None
+                        return
+                    await asyncio.wait((next_response,), timeout=0.05)
+                try:
+                    response = next_response.result()
+                except StopAsyncIteration:
+                    break
+
+            indication, status, index, var_binds = response
             if indication:
                 raise RuntimeError(str(indication))
             if status:
                 raise RuntimeError(f"SNMP error {status} at varbind {index}")
-            results.extend(_format_var_bind(name, value) for name, value in var_binds)
+            pending.extend(_format_var_bind(name, value) for name, value in var_binds)
+            if len(pending) >= batch_size:
+                yield tuple(pending)
+                pending.clear()
+    except Exception:
+        if pending:
+            yield tuple(pending)
+        raise
     finally:
-        engine.close_dispatcher()
+        try:
+            if walk_iterator is not None:
+                close_iterator = getattr(walk_iterator, "aclose", None)
+                if close_iterator is not None:
+                    await close_iterator()
+        finally:
+            engine.close_dispatcher()
 
+    if pending:
+        yield tuple(pending)
+
+
+async def _walk_subtree(
+    host: str,
+    port: int,
+    community: str,
+    oid: tuple[int, ...],
+) -> list[SnmpValue]:
+    results = []
+    async for batch in _walk_subtree_batches(host, port, community, oid, 50):
+        if batch is not None:
+            results.extend(batch)
     return results
 
 
@@ -162,3 +237,36 @@ def get_subtree(
     """Fetch all accessible values below an OID using SNMPv2c GETNEXT walks."""
 
     return asyncio.run(_walk_subtree(host, port, community, oid))
+
+
+def walk_subtree(
+    host: str,
+    port: int,
+    community: str,
+    oid: tuple[int, ...],
+    on_batch: Callable[[tuple[SnmpValue, ...]], None],
+    *,
+    batch_size: int = 50,
+    cancel_event: threading.Event | None = None,
+) -> SnmpWalkResult:
+    """Walk an OID subtree, reporting batches and honoring an optional cancel event."""
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+
+    async def walk_and_report() -> SnmpWalkResult:
+        count = 0
+        async for batch in _walk_subtree_batches(
+            host,
+            port,
+            community,
+            oid,
+            batch_size,
+            cancel_event,
+        ):
+            if batch is None:
+                return SnmpWalkResult(count, aborted=True)
+            on_batch(batch)
+            count += len(batch)
+        return SnmpWalkResult(count, aborted=False)
+
+    return asyncio.run(walk_and_report())

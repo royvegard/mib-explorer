@@ -10,13 +10,18 @@ import sys
 import threading
 import tkinter as tk
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .model import OidDefinition, OidNode, build_oid_tree, parse_oid
 from .parser import ParseResult, load_mibs
-from .snmp import SnmpValue, build_table_rows, get_subtree, parse_target_settings
+from .snmp import (
+    SnmpValue,
+    parse_target_settings,
+    table_cell_for_value,
+    walk_subtree,
+)
 
 
 def _single_child_chain(node: OidNode) -> tuple[OidNode, ...]:
@@ -24,6 +29,28 @@ def _single_child_chain(node: OidNode) -> tuple[OidNode, ...]:
     while len(chain[-1].children) == 1:
         chain.append(next(iter(chain[-1].children.values())))
     return tuple(chain)
+
+
+@dataclass(frozen=True, slots=True)
+class _SnmpResultsBatch:
+    request_id: int
+    values: tuple[SnmpValue, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _SnmpResultsComplete:
+    request_id: int
+    count: int
+    aborted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _SnmpResultsFailure:
+    request_id: int
+    error: str
+
+
+_SnmpResultsEvent = _SnmpResultsBatch | _SnmpResultsComplete | _SnmpResultsFailure
 
 
 @dataclass(slots=True)
@@ -37,8 +64,15 @@ class _SnmpResultsView:
     oid: tuple[int, ...]
     table_columns: tuple[OidDefinition, ...] | None = None
     update_button: ttk.Button | None = None
+    abort_button: ttk.Button | None = None
+    cancel_event: threading.Event | None = None
     loading: bool = False
     started: bool = False
+    received_count: int = 0
+    table_row_iids: dict[tuple[int, ...], str] = field(default_factory=dict)
+    table_row_cells: dict[tuple[int, ...], dict[tuple[int, ...], str]] = field(
+        default_factory=dict
+    )
 
 
 _DARK_THEME = "dark"
@@ -235,7 +269,7 @@ class MibExplorerApp(tk.Tk):
         self._loading = False
         self._source_link_tags: list[str] = []
         self._results: queue.Queue[tuple[ParseResult | None, Exception | None]] = queue.Queue()
-        self._snmp_results: queue.Queue[tuple[int, list[SnmpValue] | None, str | None]] = queue.Queue()
+        self._snmp_results: queue.Queue[_SnmpResultsEvent] = queue.Queue()
         self._snmp_views: dict[int, _SnmpResultsView] = {}
         self._next_snmp_request_id = 0
 
@@ -658,11 +692,18 @@ class MibExplorerApp(tk.Tk):
             command=lambda: self._start_snmp_request(request_id),
         )
         view.update_button.grid(row=0, column=1, padx=(0, 6), sticky="e")
+        view.abort_button = ttk.Button(
+            footer,
+            text="Abort read",
+            command=lambda: self._abort_snmp_request(request_id),
+            state="disabled",
+        )
+        view.abort_button.grid(row=0, column=2, padx=(0, 6), sticky="e")
         ttk.Button(
             footer,
             text="Close tab",
             command=lambda: self._close_snmp_tab(request_id),
-        ).grid(row=0, column=2, sticky="e")
+        ).grid(row=0, column=3, sticky="e")
         self._start_snmp_request(request_id)
 
     def _start_snmp_request(self, request_id: int) -> None:
@@ -672,16 +713,27 @@ class MibExplorerApp(tk.Tk):
 
         request_kind = "table" if view.table_columns is not None else "subtree"
         action = "Updating" if view.started else "Reading"
+        self._clear_snmp_result_view(view)
         oid_text = "." + ".".join(str(arc) for arc in view.oid)
         view.status_var.set(
             f"{action} {request_kind} {oid_text} from {view.host}:{view.port} with SNMPv2c…"
         )
         view.started = True
         view.loading = True
+        view.cancel_event = threading.Event()
         view.update_button.configure(state="disabled")
+        if view.abort_button is not None:
+            view.abort_button.configure(state="normal")
         worker = threading.Thread(
             target=self._get_subtree_in_background,
-            args=(request_id, view.host, view.port, view.community, view.oid),
+            args=(
+                request_id,
+                view.host,
+                view.port,
+                view.community,
+                view.oid,
+                view.cancel_event,
+            ),
             daemon=True,
         )
         worker.start()
@@ -693,13 +745,36 @@ class MibExplorerApp(tk.Tk):
         port: int,
         community: str,
         oid: tuple[int, ...],
+        cancel_event: threading.Event,
     ) -> None:
         try:
-            values = get_subtree(host, port, community, oid)
+            def report_batch(values: tuple[SnmpValue, ...]) -> None:
+                self._snmp_results.put(_SnmpResultsBatch(request_id, values))
+
+            result = walk_subtree(
+                host,
+                port,
+                community,
+                oid,
+                report_batch,
+                cancel_event=cancel_event,
+            )
         except Exception as exc:  # noqa: BLE001
-            self._snmp_results.put((request_id, None, str(exc)))
+            self._snmp_results.put(_SnmpResultsFailure(request_id, str(exc)))
         else:
-            self._snmp_results.put((request_id, values, None))
+            self._snmp_results.put(
+                _SnmpResultsComplete(request_id, result.count, result.aborted)
+            )
+
+    def _abort_snmp_request(self, request_id: int) -> None:
+        view = self._snmp_views.get(request_id)
+        if view is None or not view.loading or view.cancel_event is None:
+            return
+
+        view.cancel_event.set()
+        if view.abort_button is not None:
+            view.abort_button.configure(state="disabled")
+        view.status_var.set("Aborting SNMP walk; keeping fetched values…")
 
     def _oid_name_for_text(self, oid_text: str) -> str:
         try:
@@ -716,63 +791,149 @@ class MibExplorerApp(tk.Tk):
             return ", ".join(f"{name}{suffix}" for name in names)
         return oid_text
 
+    @staticmethod
+    def _clear_snmp_result_view(view: _SnmpResultsView) -> None:
+        existing_rows = view.tree.get_children("")
+        if existing_rows:
+            view.tree.delete(*existing_rows)
+        view.received_count = 0
+        view.table_row_iids.clear()
+        view.table_row_cells.clear()
+
     def _poll_snmp_results(self) -> None:
-        while True:
+        # Limit each pass so Tk can redraw between batches during large walks.
+        for _ in range(20):
             try:
-                request_id, values, error = self._snmp_results.get_nowait()
+                event = self._snmp_results.get_nowait()
             except queue.Empty:
                 return
 
-            view = self._snmp_views.get(request_id)
+            view = self._snmp_views.get(event.request_id)
             if view is None:
                 continue
-            view.loading = False
-            if view.update_button is not None:
-                view.update_button.configure(state="normal")
-            if error is not None:
-                view.status_var.set(f"SNMP walk failed: {error}")
-                continue
-
-            existing_rows = view.tree.get_children("")
-            if existing_rows:
-                view.tree.delete(*existing_rows)
-            if not values:
-                view.status_var.set("No descendant OIDs were returned by the agent.")
-                continue
-
-            if view.table_columns:
-                rows = build_table_rows(values, view.table_columns)
-                for row in rows:
-                    view.tree.insert("", "end", values=row)
-                if rows:
-                    view.status_var.set(
-                        f"Received {len(rows)} table row(s) from {len(values)} value(s)."
-                    )
-                else:
-                    view.status_var.set("No table rows matched the loaded column definitions.")
+            if isinstance(event, _SnmpResultsBatch):
+                self._append_snmp_values(view, event.values)
+            elif isinstance(event, _SnmpResultsComplete):
+                view.loading = False
+                view.cancel_event = None
+                if view.update_button is not None:
+                    view.update_button.configure(state="normal")
+                if view.abort_button is not None:
+                    view.abort_button.configure(state="disabled")
+                self._finish_snmp_results(view, event.count, event.aborted)
             else:
-                for value in values:
-                    view.tree.insert(
+                view.loading = False
+                view.cancel_event = None
+                if view.update_button is not None:
+                    view.update_button.configure(state="normal")
+                if view.abort_button is not None:
+                    view.abort_button.configure(state="disabled")
+                view.status_var.set(f"SNMP walk failed: {event.error}")
+
+    def _append_snmp_values(
+        self,
+        view: _SnmpResultsView,
+        values: tuple[SnmpValue, ...],
+    ) -> None:
+        view.received_count += len(values)
+        if view.table_columns:
+            for value in values:
+                cell = table_cell_for_value(value, view.table_columns)
+                if cell is None:
+                    continue
+                row_index, column_oid, cell_value = cell
+                row_iid = view.table_row_iids.get(row_index)
+                if row_iid is None:
+                    row_iid = view.tree.insert(
                         "",
                         "end",
                         values=(
-                            self._oid_name_for_text(value.oid),
-                            value.oid,
-                            value.syntax,
-                            value.value,
+                            ".".join(str(arc) for arc in row_index),
+                            *("" for _ in view.table_columns),
                         ),
                     )
-                if view.table_columns is not None:
-                    view.status_var.set(
-                        f"Received {len(values)} value(s); no table-column definitions "
-                        "were loaded, so raw OIDs are shown."
-                    )
-                else:
-                    view.status_var.set(f"Received {len(values)} value(s).")
+                    view.table_row_iids[row_index] = row_iid
+                    view.table_row_cells[row_index] = {}
+
+                cells = view.table_row_cells[row_index]
+                cells[column_oid] = cell_value
+                row_values = (
+                    ".".join(str(arc) for arc in row_index),
+                    *(cells.get(column.oid, "") for column in view.table_columns),
+                )
+                view.tree.item(row_iid, values=row_values)
+        else:
+            for value in values:
+                view.tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        self._oid_name_for_text(value.oid),
+                        value.oid,
+                        value.syntax,
+                        value.value,
+                    ),
+                )
+
+        if view.table_columns:
+            view.status_var.set(
+                f"Received {view.received_count} value(s); "
+                f"{len(view.table_row_iids)} table row(s) so far…"
+            )
+        elif view.table_columns is not None:
+            view.status_var.set(
+                f"Received {view.received_count} value(s); no table-column definitions "
+                "were loaded, so raw OIDs are shown…"
+            )
+        else:
+            view.status_var.set(f"Received {view.received_count} value(s)…")
+
+    @staticmethod
+    def _finish_snmp_results(
+        view: _SnmpResultsView,
+        count: int,
+        aborted: bool = False,
+    ) -> None:
+        if aborted:
+            if count == 0:
+                view.status_var.set("Read aborted; no values were received.")
+            elif view.table_columns:
+                view.status_var.set(
+                    f"Read aborted after {count} value(s) across "
+                    f"{len(view.table_row_iids)} table row(s)."
+                )
+            elif view.table_columns is not None:
+                view.status_var.set(
+                    f"Read aborted after {count} value(s); raw OIDs are shown because "
+                    "no table-column definitions were loaded."
+                )
+            else:
+                view.status_var.set(f"Read aborted after {count} value(s).")
+            return
+
+        if count == 0:
+            view.status_var.set("No descendant OIDs were returned by the agent.")
+        elif view.table_columns:
+            if view.table_row_iids:
+                view.status_var.set(
+                    f"Received {count} value(s) across "
+                    f"{len(view.table_row_iids)} table row(s)."
+                )
+            else:
+                view.status_var.set("No table rows matched the loaded column definitions.")
+        elif view.table_columns is not None:
+            view.status_var.set(
+                f"Received {count} value(s); no table-column definitions were loaded, "
+                "so raw OIDs are shown."
+            )
+        else:
+            view.status_var.set(f"Received {count} value(s).")
 
     def _close_snmp_tab(self, request_id: int) -> None:
         view = self._snmp_views.pop(request_id, None)
         if view is not None:
+            if view.cancel_event is not None:
+                view.cancel_event.set()
             self._notebook.forget(view.tab)
             view.tab.destroy()
 
