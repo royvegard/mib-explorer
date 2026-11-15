@@ -275,6 +275,10 @@ class MibExplorerApp(tk.Tk):
         self._tree.grid(row=0, column=0, sticky="nsew")
         tree_scroll.grid(row=0, column=1, sticky="ns")
         self._tree.bind("<<TreeviewSelect>>", self._show_selected_details)
+        self._tree.bind("<Return>", self._find_matches)
+        self._tree.bind("<n>", self._find_matches)
+        self._tree.bind("<Shift-Return>", self._previous_match)
+        self._tree.bind("<Shift-N>", self._previous_match)
         content.add(tree_frame, weight=3)
 
         details_frame = ttk.LabelFrame(content, text="Definition details", padding=6)
