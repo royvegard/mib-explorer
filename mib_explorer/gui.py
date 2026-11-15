@@ -13,8 +13,9 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from .model import OidDefinition, OidNode, build_oid_tree
+from .model import OidDefinition, OidNode, build_oid_tree, parse_oid
 from .parser import ParseResult, load_mibs
+from .snmp import SnmpValue, get_subtree, parse_target_settings
 
 
 def _single_child_chain(node: OidNode) -> tuple[OidNode, ...]:
@@ -191,6 +192,9 @@ class MibExplorerApp(tk.Tk):
         self._loading = False
         self._source_link_tags: list[str] = []
         self._results: queue.Queue[tuple[ParseResult | None, Exception | None]] = queue.Queue()
+        self._snmp_results: queue.Queue[tuple[int, list[SnmpValue] | None, str | None]] = queue.Queue()
+        self._snmp_views: dict[int, tuple[ttk.Frame, ttk.Treeview, tk.StringVar]] = {}
+        self._next_snmp_request_id = 0
 
         self._build_widgets()
         self._set_theme("dark")
@@ -200,7 +204,7 @@ class MibExplorerApp(tk.Tk):
 
     def _build_widgets(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(2, weight=1)
 
         toolbar = ttk.Frame(self, padding=(8, 8, 8, 4))
         toolbar.grid(row=0, column=0, sticky="ew")
@@ -249,8 +253,37 @@ class MibExplorerApp(tk.Tk):
         )
         self._theme_button.grid(row=0, column=6, padx=(10, 0))
 
-        content = ttk.Panedwindow(self, orient="horizontal")
-        content.grid(row=1, column=0, sticky="nsew", padx=8, pady=4)
+        snmp_frame = ttk.LabelFrame(self, text="SNMP target", padding=(8, 5))
+        snmp_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=4)
+        snmp_frame.columnconfigure(1, weight=2)
+        snmp_frame.columnconfigure(5, weight=1)
+        self._snmp_host_var = tk.StringVar()
+        self._snmp_port_var = tk.StringVar(value="161")
+        self._snmp_community_var = tk.StringVar(value="public")
+        ttk.Label(snmp_frame, text="Agent:").grid(row=0, column=0, padx=(0, 5))
+        ttk.Entry(snmp_frame, textvariable=self._snmp_host_var, width=28).grid(
+            row=0, column=1, sticky="ew", padx=(0, 12)
+        )
+        ttk.Label(snmp_frame, text="Port:").grid(row=0, column=2, padx=(0, 5))
+        ttk.Entry(snmp_frame, textvariable=self._snmp_port_var, width=8).grid(
+            row=0, column=3, sticky="w", padx=(0, 12)
+        )
+        ttk.Label(snmp_frame, text="Community (v2c):").grid(row=0, column=4, padx=(0, 5))
+        ttk.Entry(
+            snmp_frame,
+            textvariable=self._snmp_community_var,
+            width=24,
+        ).grid(row=0, column=5, sticky="ew")
+
+        self._notebook = ttk.Notebook(self)
+        self._notebook.grid(row=2, column=0, sticky="nsew", padx=8, pady=4)
+        browser_tab = ttk.Frame(self._notebook)
+        browser_tab.rowconfigure(0, weight=1)
+        browser_tab.columnconfigure(0, weight=1)
+        self._notebook.add(browser_tab, text="MIB Browser")
+
+        content = ttk.Panedwindow(browser_tab, orient="horizontal")
+        content.grid(row=0, column=0, sticky="nsew")
 
         tree_frame = ttk.Frame(content, padding=(0, 0, 5, 0))
         tree_frame.rowconfigure(0, weight=1)
@@ -279,6 +312,9 @@ class MibExplorerApp(tk.Tk):
         self._tree.bind("<n>", self._find_matches)
         self._tree.bind("<Shift-Return>", self._previous_match)
         self._tree.bind("<Shift-N>", self._previous_match)
+        self._tree_context_menu = tk.Menu(self._tree, tearoff=False)
+        self._tree_context_menu.add_command(label="Get subtree", command=self._get_selected_subtree)
+        self._tree.bind("<Button-3>", self._show_tree_context_menu)
         content.add(tree_frame, weight=3)
 
         details_frame = ttk.LabelFrame(content, text="Definition details", padding=6)
@@ -293,18 +329,18 @@ class MibExplorerApp(tk.Tk):
 
         self._status_var = tk.StringVar(value="Open MIB/SMI files or a folder to get started.")
         ttk.Label(self, textvariable=self._status_var, anchor="w", padding=(8, 3)).grid(
-            row=2, column=0, sticky="ew"
+            row=3, column=0, sticky="ew"
         )
 
         warning_frame = ttk.LabelFrame(self, text="Parser warnings", padding=(6, 3))
-        warning_frame.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 8))
+        warning_frame.grid(row=4, column=0, sticky="ew", padx=8, pady=(0, 8))
         warning_frame.columnconfigure(0, weight=1)
         self._warning_text = tk.Text(warning_frame, height=4, wrap="word", state="disabled")
         warning_scroll = ttk.Scrollbar(warning_frame, orient="vertical", command=self._warning_text.yview)
         self._warning_text.configure(yscrollcommand=warning_scroll.set)
         self._warning_text.grid(row=0, column=0, sticky="ew")
         warning_scroll.grid(row=0, column=1, sticky="ns")
-        self.rowconfigure(3, weight=0)
+        self.rowconfigure(4, weight=0)
         self._configure_search_match_tag()
         self._set_text(self._details, "Select an OID node to inspect its MIB definitions.")
         self._refresh_warnings()
@@ -393,6 +429,174 @@ class MibExplorerApp(tk.Tk):
         if path:
             self._start_loading((path,))
 
+    def _show_tree_context_menu(self, event: tk.Event) -> str:
+        iid = self._tree.identify_row(event.y)
+        if not iid:
+            return "break"
+
+        self._tree.selection_set(iid)
+        self._tree.focus(iid)
+        oid = self._oid_by_iid.get(iid)
+        self._tree_context_menu.entryconfigure(
+            "Get subtree",
+            state="normal" if oid else "disabled",
+        )
+        try:
+            self._tree_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._tree_context_menu.grab_release()
+        return "break"
+
+
+    def _get_selected_subtree(self) -> None:
+        selection = self._tree.selection()
+        if not selection:
+            return
+        oid = self._oid_by_iid.get(selection[0])
+        if not oid:
+            return
+
+        try:
+            host, port, community = parse_target_settings(
+                self._snmp_host_var.get(),
+                self._snmp_port_var.get(),
+                self._snmp_community_var.get(),
+            )
+        except ValueError as exc:
+            messagebox.showerror("Invalid SNMP target", str(exc), parent=self)
+            return
+
+        self._open_snmp_results_tab(host, port, community, oid)
+
+    def _open_snmp_results_tab(
+        self,
+        host: str,
+        port: int,
+        community: str,
+        oid: tuple[int, ...],
+    ) -> None:
+        oid_text = "." + ".".join(str(arc) for arc in oid)
+        result_tab = ttk.Frame(self._notebook, padding=8)
+        result_tab.rowconfigure(0, weight=1)
+        result_tab.columnconfigure(0, weight=1)
+        self._notebook.add(result_tab, text=f"{host} {oid_text}")
+        self._notebook.select(result_tab)
+
+        table_frame = ttk.Frame(result_tab)
+        table_frame.grid(row=0, column=0, sticky="nsew")
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+        tree = ttk.Treeview(
+            table_frame,
+            columns=("name", "oid", "syntax", "value"),
+            show="headings",
+            selectmode="browse",
+        )
+        tree.heading("name", text="OID name")
+        tree.heading("oid", text="Numeric OID")
+        tree.heading("syntax", text="Type")
+        tree.heading("value", text="Value")
+        tree.column("name", width=220, minwidth=140, stretch=False)
+        tree.column("oid", width=230, minwidth=150, stretch=False)
+        tree.column("syntax", width=130, minwidth=90, stretch=False)
+        tree.column("value", width=520, minwidth=200, stretch=True)
+        vertical = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        horizontal = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal.grid(row=1, column=0, sticky="ew")
+
+        status_var = tk.StringVar(
+            value=f"Reading {oid_text} from {host}:{port} with SNMPv2c…"
+        )
+        footer = ttk.Frame(result_tab)
+        footer.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        footer.columnconfigure(0, weight=1)
+        ttk.Label(footer, textvariable=status_var, anchor="w").grid(
+            row=0, column=0, sticky="ew", padx=(0, 8)
+        )
+
+        self._next_snmp_request_id += 1
+        request_id = self._next_snmp_request_id
+        self._snmp_views[request_id] = (result_tab, tree, status_var)
+        ttk.Button(
+            footer,
+            text="Close tab",
+            command=lambda: self._close_snmp_tab(request_id),
+        ).grid(row=0, column=1, sticky="e")
+        worker = threading.Thread(
+            target=self._get_subtree_in_background,
+            args=(request_id, host, port, community, oid),
+            daemon=True,
+        )
+        worker.start()
+
+    def _get_subtree_in_background(
+        self,
+        request_id: int,
+        host: str,
+        port: int,
+        community: str,
+        oid: tuple[int, ...],
+    ) -> None:
+        try:
+            values = get_subtree(host, port, community, oid)
+        except Exception as exc:  # noqa: BLE001
+            self._snmp_results.put((request_id, None, str(exc)))
+        else:
+            self._snmp_results.put((request_id, values, None))
+
+    def _oid_name_for_text(self, oid_text: str) -> str:
+        try:
+            oid = parse_oid(oid_text)
+        except ValueError:
+            return oid_text
+
+        for prefix_length in range(len(oid), 0, -1):
+            node = self._nodes_by_oid.get(oid[:prefix_length])
+            if node is None or not node.definitions:
+                continue
+            names = sorted({definition.name for definition in node.definitions})
+            suffix = "".join(f".{arc}" for arc in oid[prefix_length:])
+            return ", ".join(f"{name}{suffix}" for name in names)
+        return oid_text
+
+    def _poll_snmp_results(self) -> None:
+        while True:
+            try:
+                request_id, values, error = self._snmp_results.get_nowait()
+            except queue.Empty:
+                return
+
+            view = self._snmp_views.get(request_id)
+            if view is None:
+                continue
+            _window, tree, status_var = view
+            if error is not None:
+                status_var.set(f"SNMP walk failed: {error}")
+            elif values:
+                for value in values:
+                    tree.insert(
+                        "",
+                        "end",
+                        values=(
+                            self._oid_name_for_text(value.oid),
+                            value.oid,
+                            value.syntax,
+                            value.value,
+                        ),
+                    )
+                status_var.set(f"Received {len(values)} value(s).")
+            else:
+                status_var.set("No descendant OIDs were returned by the agent.")
+
+    def _close_snmp_tab(self, request_id: int) -> None:
+        view = self._snmp_views.pop(request_id, None)
+        if view is not None:
+            self._notebook.forget(view[0])
+            view[0].destroy()
+
     def _start_loading(self, paths: Sequence[str | Path]) -> None:
         if self._loading:
             return
@@ -410,6 +614,7 @@ class MibExplorerApp(tk.Tk):
             self._results.put((None, exc))
 
     def _poll_results(self) -> None:
+        self._poll_snmp_results()
         try:
             result, error = self._results.get_nowait()
         except queue.Empty:

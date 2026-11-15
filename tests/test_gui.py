@@ -5,7 +5,7 @@ import unittest
 from typing import Any, cast
 
 from mib_explorer.gui import MibExplorerApp
-from mib_explorer.model import OidDefinition
+from mib_explorer.model import OidDefinition, OidNode
 
 
 class FakeTree:
@@ -120,6 +120,15 @@ class PreviousMatchHarness:
         self.direction = direction
 
 
+class OidNameHarness:
+    _oid_name_for_text = MibExplorerApp._oid_name_for_text
+
+    def __init__(self) -> None:
+        definition = OidDefinition("sysDescr", (1, 3, 6, 1, 2, 1, 1, 1), "SNMPv2-MIB")
+        oid = definition.oid
+        self._nodes_by_oid = {oid: OidNode(oid, definitions=[definition])}
+
+
 class TreeRebuildHarness:
     _rebuild_tree = MibExplorerApp._rebuild_tree
     _clear_search_highlights = MibExplorerApp._clear_search_highlights
@@ -169,6 +178,21 @@ class TreeControlTests(unittest.TestCase):
 
         self.assertEqual(app.direction, -1)
         self.assertEqual(result, "break")
+
+    def test_resolves_exact_snmp_oid_name(self) -> None:
+        app = OidNameHarness()
+
+        self.assertEqual(app._oid_name_for_text(".1.3.6.1.2.1.1.1"), "sysDescr")
+
+    def test_resolves_snmp_instance_using_longest_known_oid_name(self) -> None:
+        app = OidNameHarness()
+
+        self.assertEqual(app._oid_name_for_text(".1.3.6.1.2.1.1.1.0"), "sysDescr.0")
+
+    def test_unknown_snmp_oid_uses_numeric_oid_as_name(self) -> None:
+        app = OidNameHarness()
+
+        self.assertEqual(app._oid_name_for_text(".1.3.6.1.99"), ".1.3.6.1.99")
 
     def test_expand_all_opens_every_tree_item(self) -> None:
         app = TreeControlHarness()
