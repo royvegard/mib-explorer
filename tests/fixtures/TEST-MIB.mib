@@ -19,4 +19,11 @@ testScalar OBJECT-TYPE
         Final paragraph."
     ::= { testBranch 1 }
 
+testMode OBJECT-TYPE
+    SYNTAX      INTEGER { off(0), on(1), unknown(2) }
+    MAX-ACCESS  read-only
+    STATUS      current
+    DESCRIPTION "An INTEGER with named values."
+    ::= { testBranch 2 }
+
 END

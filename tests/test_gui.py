@@ -182,6 +182,7 @@ class OidNameHarness:
     _oid_name_for_text = MibExplorerApp._oid_name_for_text
     _oid_name_for_result = MibExplorerApp._oid_name_for_result
     _result_oid_is_defined = MibExplorerApp._result_oid_is_defined
+    _format_result_value = MibExplorerApp._format_result_value
 
     def __init__(self) -> None:
         definitions = (
@@ -202,6 +203,16 @@ class OidNameHarness:
                 (1, 3, 6, 1, 2, 1, 2, 2, 1, 2),
                 "IF-MIB",
                 kind="MibTableColumn",
+            ),
+            OidDefinition(
+                "ifType",
+                (1, 3, 6, 1, 2, 1, 2, 2, 1, 3),
+                "IF-MIB",
+                kind="MibTableColumn",
+                integer_enumerations=(
+                    ("other", 1),
+                    ("ethernetCsmacd", 6),
+                ),
             ),
         )
         self._nodes_by_oid = {
@@ -270,6 +281,7 @@ class SnmpResultsPollingHarness:
     _oid_name_for_text = MibExplorerApp._oid_name_for_text
     _oid_name_for_result = MibExplorerApp._oid_name_for_result
     _result_oid_is_defined = MibExplorerApp._result_oid_is_defined
+    _format_result_value = MibExplorerApp._format_result_value
     _clear_snmp_result_view = staticmethod(MibExplorerApp._clear_snmp_result_view)
 
     def __init__(self, rows: list[tuple[str, ...]]) -> None:
@@ -439,6 +451,28 @@ class TreeControlTests(unittest.TestCase):
         )
         self.assertEqual(app._oid_name_for_result(".1.3.6.1.99"), ".1.3.6.1.99*")
 
+    def test_integer_result_values_use_loaded_enum_labels(self) -> None:
+        app = OidNameHarness()
+
+        self.assertEqual(
+            app._format_result_value(
+                SnmpValue(".1.3.6.1.2.1.2.2.1.3.1", "Integer32", "6")
+            ),
+            "ethernetCsmacd(6)",
+        )
+        self.assertEqual(
+            app._format_result_value(
+                SnmpValue(".1.3.6.1.2.1.2.2.1.3.1", "Integer32", "99")
+            ),
+            "99",
+        )
+        self.assertEqual(
+            app._format_result_value(
+                SnmpValue(".1.3.6.1.2.1.2.2.1.3.1", "OctetString", "6")
+            ),
+            "6",
+        )
+
     def test_double_clicking_result_row_selects_nearest_mib_node(self) -> None:
         app = OidNavigationHarness()
 
@@ -500,6 +534,45 @@ class TreeControlTests(unittest.TestCase):
         self.assertEqual(app.abort_button.state, "disabled")
         self.assertFalse(app.view.loading)
 
+    def test_raw_results_render_enum_labels(self) -> None:
+        app = SnmpResultsPollingHarness([])
+        definition = OidDefinition(
+            "ifType",
+            (1, 3, 6, 1, 2, 1, 2, 2, 1, 3),
+            "IF-MIB",
+            kind="MibTableColumn",
+            integer_enumerations=(("ethernetCsmacd", 6),),
+        )
+        app._nodes_by_oid = {
+            definition.oid: OidNode(definition.oid, definitions=[definition])
+        }
+        app._snmp_results.put(
+            _SnmpResultsBatch(
+                1,
+                (
+                    SnmpValue(
+                        ".1.3.6.1.2.1.2.2.1.3.1",
+                        "Integer32",
+                        "6",
+                    ),
+                ),
+            )
+        )
+
+        app._poll_snmp_results()
+
+        self.assertEqual(
+            app.tree.rows,
+            [
+                (
+                    "ifType.1",
+                    ".1.3.6.1.2.1.2.2.1.3.1",
+                    "Integer32",
+                    "ethernetCsmacd(6)",
+                )
+            ],
+        )
+
     def test_snmp_abort_keeps_fetched_rows_and_reports_aborted_state(self) -> None:
         app = SnmpResultsPollingHarness([])
         app._snmp_results.put(
@@ -559,7 +632,15 @@ class TreeControlTests(unittest.TestCase):
     def test_table_batches_fill_the_same_row_incrementally(self) -> None:
         app = SnmpResultsPollingHarness([])
         column_index = OidDefinition("sampleIndex", (1, 3, 6, 1), "TEST-MIB")
-        column_value = OidDefinition("sampleValue", (1, 3, 6, 2), "TEST-MIB")
+        column_value = OidDefinition(
+            "sampleValue",
+            (1, 3, 6, 2),
+            "TEST-MIB",
+            integer_enumerations=(("ready", 1),),
+        )
+        app._nodes_by_oid = {
+            column_value.oid: OidNode(column_value.oid, definitions=[column_value])
+        }
         app.view.table_columns = (column_index, column_value)
         app._snmp_results.put(
             _SnmpResultsBatch(1, (SnmpValue(".1.3.6.1.7", "Integer32", "7"),))
@@ -569,11 +650,11 @@ class TreeControlTests(unittest.TestCase):
         self.assertEqual(app.tree.rows, [("7", "7", "")])
 
         app._snmp_results.put(
-            _SnmpResultsBatch(1, (SnmpValue(".1.3.6.2.7", "OctetString", "ready"),))
+            _SnmpResultsBatch(1, (SnmpValue(".1.3.6.2.7", "Integer32", "1"),))
         )
         app._poll_snmp_results()
 
-        self.assertEqual(app.tree.rows, [("7", "7", "ready")])
+        self.assertEqual(app.tree.rows, [("7", "7", "ready(1)")])
         self.assertEqual(app.view.table_row_iids, {(7,): "0"})
         self.assertEqual(app.view.oid_by_row_iid, {"0": (1, 3, 6, 1, 7)})
 

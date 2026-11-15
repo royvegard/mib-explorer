@@ -20,6 +20,7 @@ class OidDefinition:
     description: str = ""
     source_file: str = ""
     source_path: str = ""
+    integer_enumerations: tuple[tuple[str, int], ...] = ()
 
     @property
     def oid_text(self) -> str:

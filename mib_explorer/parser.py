@@ -70,6 +70,29 @@ def _display_value(value: object) -> str:
     return str(value)
 
 
+def _extract_integer_enumerations(value: object) -> tuple[tuple[str, int], ...]:
+    if not isinstance(value, dict):
+        return ()
+
+    syntax_type = str(value.get("type") or "").casefold()
+    if syntax_type not in {"integer", "integer32"}:
+        return ()
+
+    enumerations = value.get("enumeration")
+    if not isinstance(enumerations, dict):
+        constraints = value.get("constraints")
+        if isinstance(constraints, dict):
+            enumerations = constraints.get("enumeration")
+    if not isinstance(enumerations, dict):
+        return ()
+
+    return tuple(
+        (str(name), number)
+        for name, number in enumerations.items()
+        if isinstance(number, int) and not isinstance(number, bool)
+    )
+
+
 def _find_raw_description(value: object) -> str | None:
     if isinstance(value, tuple):
         if len(value) == 2 and value[0] == "DESCRIPTION" and isinstance(value[1], str):
@@ -158,18 +181,20 @@ def _module_definitions(
 
         name = str(entry.get("name") or symbol)
         description = raw_descriptions.get((module, name), str(entry.get("description") or ""))
+        syntax = entry.get("syntax")
         definitions.append(
             OidDefinition(
                 name=name,
                 oid=oid,
                 module=module,
                 kind=str(entry.get("nodetype") or entry.get("class") or ""),
-                syntax=_display_value(entry.get("syntax")),
+                syntax=_display_value(syntax),
                 access=str(entry.get("maxaccess") or entry.get("access") or ""),
                 status=_display_value(entry.get("status")),
                 description=description,
                 source_file=source_files.get(module, ""),
                 source_path=source_paths.get(module, ""),
+                integer_enumerations=_extract_integer_enumerations(syntax),
             )
         )
 

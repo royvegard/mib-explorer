@@ -17,6 +17,14 @@ class MibParserTests(unittest.TestCase):
         scalar = definitions[("TEST-MIB", "testScalar")]
         self.assertEqual(scalar.oid, (1, 3, 6, 1, 4, 1, 55555, 1, 1))
         self.assertEqual(scalar.syntax, "INTEGER")
+        self.assertEqual(scalar.integer_enumerations, ())
+        mode = definitions[("TEST-MIB", "testMode")]
+        self.assertEqual(mode.syntax, "INTEGER")
+        self.assertEqual(
+            mode.integer_enumerations,
+            (("off", 0), ("on", 1), ("unknown", 2)),
+        )
+        self.assertEqual(mode.source_file, "TEST-MIB.mib")
         self.assertEqual(scalar.source_file, "TEST-MIB.mib")
         self.assertEqual(scalar.source_path, str((FIXTURES / "TEST-MIB.mib").resolve()))
         self.assertEqual(

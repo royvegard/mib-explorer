@@ -892,6 +892,40 @@ class MibExplorerApp(tk.Tk):
                     return True
         return False
 
+    def _format_result_value(self, value: SnmpValue) -> str:
+        if value.syntax.casefold() not in {"integer", "integer32"}:
+            return value.value
+        try:
+            numeric_value = int(value.value)
+            oid = parse_oid(value.oid)
+        except ValueError:
+            return value.value
+
+        for prefix_length in range(len(oid), 0, -1):
+            node = self._nodes_by_oid.get(oid[:prefix_length])
+            if node is None:
+                continue
+            enum_definitions = [
+                definition
+                for definition in node.definitions
+                if definition.integer_enumerations
+            ]
+            if not enum_definitions:
+                continue
+
+            labels = {
+                name
+                for definition in enum_definitions
+                for name, number in definition.integer_enumerations
+                if number == numeric_value
+            }
+            if len(labels) == 1:
+                label = next(iter(labels))
+                return f"{label}({numeric_value})"
+            return value.value
+
+        return value.value
+
     def _oid_name_for_text(self, oid_text: str) -> str:
         try:
             oid = parse_oid(oid_text)
@@ -958,7 +992,7 @@ class MibExplorerApp(tk.Tk):
                 cell = table_cell_for_value(value, view.table_columns)
                 if cell is None:
                     continue
-                row_index, column_oid, cell_value = cell
+                row_index, column_oid, _cell_value = cell
                 row_iid = view.table_row_iids.get(row_index)
                 if row_iid is None:
                     row_iid = view.tree.insert(
@@ -974,7 +1008,7 @@ class MibExplorerApp(tk.Tk):
 
                 view.oid_by_row_iid.setdefault(row_iid, parse_oid(value.oid))
                 cells = view.table_row_cells[row_index]
-                cells[column_oid] = cell_value
+                cells[column_oid] = self._format_result_value(value)
                 row_values = (
                     ".".join(str(arc) for arc in row_index),
                     *(cells.get(column.oid, "") for column in view.table_columns),
@@ -989,7 +1023,7 @@ class MibExplorerApp(tk.Tk):
                         self._oid_name_for_result(value.oid),
                         value.oid,
                         value.syntax,
-                        value.value,
+                        self._format_result_value(value),
                     ),
                 )
                 try:
