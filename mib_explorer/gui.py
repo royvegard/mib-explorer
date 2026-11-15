@@ -29,6 +29,7 @@ class MibExplorerApp(tk.Tk):
         self.title("MIB Explorer")
         self.geometry("1120x720")
         self.minsize(760, 480)
+        self._style = ttk.Style(self)
 
         self._definitions: dict[tuple[str, str, tuple[int, ...]], OidDefinition] = {}
         self._warnings: list[str] = []
@@ -74,6 +75,21 @@ class MibExplorerApp(tk.Tk):
         ttk.Button(toolbar, text="Collapse all", command=self._collapse_all).grid(
             row=0, column=7, padx=(6, 0)
         )
+        self._theme_var = tk.StringVar(value=self._style.theme_use())
+        self._theme_menu = tk.Menu(toolbar, tearoff=False)
+        for theme in self._style.theme_names():
+            self._theme_menu.add_radiobutton(
+                label=theme,
+                variable=self._theme_var,
+                value=theme,
+                command=lambda selected_theme=theme: self._set_theme(selected_theme),
+            )
+        self._theme_button = ttk.Menubutton(
+            toolbar,
+            text=f"Theme: {self._theme_var.get()}",
+            menu=self._theme_menu,
+        )
+        self._theme_button.grid(row=0, column=8, padx=(10, 0))
 
         content = ttk.Panedwindow(self, orient="horizontal")
         content.grid(row=1, column=0, sticky="nsew", padx=8, pady=4)
@@ -81,7 +97,7 @@ class MibExplorerApp(tk.Tk):
         tree_frame = ttk.Frame(content, padding=(0, 0, 5, 0))
         tree_frame.rowconfigure(0, weight=1)
         tree_frame.columnconfigure(0, weight=1)
-        ttk.Style(self).configure("MibExplorer.Treeview", font="TkFixedFont")
+        self._style.configure("MibExplorer.Treeview", font="TkFixedFont")
         self._tree = ttk.Treeview(
             tree_frame,
             columns=("oid", "kind", "syntax"),
@@ -130,6 +146,14 @@ class MibExplorerApp(tk.Tk):
         self.rowconfigure(3, weight=0)
         self._set_text(self._details, "Select an OID node to inspect its MIB definitions.")
         self._refresh_warnings()
+
+    def _set_theme(self, theme: str) -> None:
+        if theme not in self._style.theme_names():
+            return
+        self._style.theme_use(theme)
+        self._style.configure("MibExplorer.Treeview", font="TkFixedFont")
+        self._theme_var.set(theme)
+        self._theme_button.configure(text=f"Theme: {theme}")
 
     def _choose_files(self) -> None:
         paths = filedialog.askopenfilenames(
