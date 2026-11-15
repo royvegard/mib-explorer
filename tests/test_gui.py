@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import unittest
-from typing import Any
+from typing import Any, cast
 
 from mib_explorer.gui import MibExplorerApp
 from mib_explorer.model import OidDefinition
@@ -93,9 +93,31 @@ class FakeVariable:
         self.value = value
 
 
-class FakeButton:
-    def configure(self, **_options: str) -> None:
-        pass
+
+class FakeSearchEntry:
+    def __init__(self) -> None:
+        self.focused = False
+        self.selection: tuple[int, str] | None = None
+
+    def focus_set(self) -> None:
+        self.focused = True
+
+    def selection_range(self, start: int, end: str) -> None:
+        self.selection = (start, end)
+
+
+class SearchFocusHarness:
+    _focus_search = MibExplorerApp._focus_search
+
+    def __init__(self) -> None:
+        self._search_entry = FakeSearchEntry()
+
+
+class PreviousMatchHarness:
+    _previous_match = MibExplorerApp._previous_match
+
+    def _match(self, direction: int) -> None:
+        self.direction = direction
 
 
 class TreeRebuildHarness:
@@ -120,18 +142,34 @@ class TreeRebuildHarness:
         self._definitions_by_iid = {}
         self._search_var = FakeVariable(r"^org\.dod\.internet$")
         self._search_pattern: re.Pattern[str] | None = None
-        self._next_button = FakeButton()
-        self._prev_button = FakeButton()
         self._status_var = FakeVariable("")
         self._search_matches: list[tuple[int, ...]] = []
         self._search_highlight_iids: set[str] = set()
         self._search_index = 0
+        self._prev_query = ""
 
     def _show_search_match(self) -> None:
         pass
 
 
 class TreeControlTests(unittest.TestCase):
+    def test_ctrl_f_focuses_search_and_selects_its_contents(self) -> None:
+        app = SearchFocusHarness()
+
+        result = app._focus_search()
+
+        self.assertEqual(result, "break")
+        self.assertTrue(app._search_entry.focused)
+        self.assertEqual(app._search_entry.selection, (0, "end"))
+
+    def test_shift_return_runs_previous_match_handler(self) -> None:
+        app = PreviousMatchHarness()
+
+        result = app._previous_match(cast(Any, object()))
+
+        self.assertEqual(app.direction, -1)
+        self.assertEqual(result, "break")
+
     def test_expand_all_opens_every_tree_item(self) -> None:
         app = TreeControlHarness()
 
