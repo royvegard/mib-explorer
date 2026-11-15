@@ -63,6 +63,7 @@ class _SnmpResultsView:
     community: str
     oid: tuple[int, ...]
     table_columns: tuple[OidDefinition, ...] | None = None
+    walk_entire_mib: bool = False
     update_button: ttk.Button | None = None
     abort_button: ttk.Button | None = None
     cancel_event: threading.Event | None = None
@@ -519,6 +520,11 @@ class MibExplorerApp(tk.Tk):
             command=self._get_selected_subtree,
             state="normal" if oid else "disabled",
         )
+        self._tree_context_menu.add_command(
+            label="Walk",
+            command=self._walk_selected_oid,
+            state="normal" if oid else "disabled",
+        )
         if self._table_definition_for_iid(iid) is not None:
             self._tree_context_menu.add_command(
                 label="Get table",
@@ -581,6 +587,32 @@ class MibExplorerApp(tk.Tk):
 
         self._open_snmp_results_tab(host, port, community, oid)
 
+    def _walk_selected_oid(self) -> None:
+        selection = self._tree.selection()
+        if not selection:
+            return
+        oid = self._oid_by_iid.get(selection[0])
+        if not oid:
+            return
+
+        try:
+            host, port, community = parse_target_settings(
+                self._snmp_host_var.get(),
+                self._snmp_port_var.get(),
+                self._snmp_community_var.get(),
+            )
+        except ValueError as exc:
+            messagebox.showerror("Invalid SNMP target", str(exc), parent=self)
+            return
+
+        self._open_snmp_results_tab(
+            host,
+            port,
+            community,
+            oid,
+            walk_entire_mib=True,
+        )
+
     def _get_selected_table(self) -> None:
         selection = self._tree.selection()
         if not selection:
@@ -614,6 +646,7 @@ class MibExplorerApp(tk.Tk):
         community: str,
         oid: tuple[int, ...],
         table_columns: tuple[OidDefinition, ...] | None = None,
+        walk_entire_mib: bool = False,
     ) -> None:
         oid_text = "." + ".".join(str(arc) for arc in oid)
         result_tab = ttk.Frame(self._notebook, padding=8)
@@ -662,7 +695,12 @@ class MibExplorerApp(tk.Tk):
         vertical.grid(row=0, column=1, sticky="ns")
         horizontal.grid(row=1, column=0, sticky="ew")
 
-        request_kind = "table" if table_columns is not None else "subtree"
+        if walk_entire_mib:
+            request_kind = "walk"
+        elif table_columns is not None:
+            request_kind = "table"
+        else:
+            request_kind = "subtree"
         status_var = tk.StringVar(
             value=f"Reading {request_kind} {oid_text} from {host}:{port} with SNMPv2c…"
         )
@@ -684,6 +722,7 @@ class MibExplorerApp(tk.Tk):
             community,
             oid,
             table_columns,
+            walk_entire_mib=walk_entire_mib,
         )
         self._snmp_views[request_id] = view
         view.update_button = ttk.Button(
@@ -711,7 +750,12 @@ class MibExplorerApp(tk.Tk):
         if view is None or view.loading or view.update_button is None:
             return
 
-        request_kind = "table" if view.table_columns is not None else "subtree"
+        if view.walk_entire_mib:
+            request_kind = "walk"
+        elif view.table_columns is not None:
+            request_kind = "table"
+        else:
+            request_kind = "subtree"
         action = "Updating" if view.started else "Reading"
         self._clear_snmp_result_view(view)
         oid_text = "." + ".".join(str(arc) for arc in view.oid)
@@ -733,6 +777,7 @@ class MibExplorerApp(tk.Tk):
                 view.community,
                 view.oid,
                 view.cancel_event,
+                view.walk_entire_mib,
             ),
             daemon=True,
         )
@@ -746,6 +791,7 @@ class MibExplorerApp(tk.Tk):
         community: str,
         oid: tuple[int, ...],
         cancel_event: threading.Event,
+        walk_entire_mib: bool,
     ) -> None:
         try:
             def report_batch(values: tuple[SnmpValue, ...]) -> None:
@@ -758,6 +804,7 @@ class MibExplorerApp(tk.Tk):
                 oid,
                 report_batch,
                 cancel_event=cancel_event,
+                walk_entire_mib=walk_entire_mib,
             )
         except Exception as exc:  # noqa: BLE001
             self._snmp_results.put(_SnmpResultsFailure(request_id, str(exc)))

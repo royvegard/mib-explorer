@@ -130,6 +130,7 @@ async def _walk_subtree_batches(
     oid: tuple[int, ...],
     batch_size: int,
     cancel_event: threading.Event | None = None,
+    lexicographic_mode: bool = False,
 ) -> AsyncIterator[tuple[SnmpValue, ...] | None]:
     try:
         from pysnmp.hlapi.v3arch.asyncio import (
@@ -163,7 +164,7 @@ async def _walk_subtree_batches(
             target,
             ContextData(),
             ObjectType(ObjectIdentity(numeric_oid)),
-            lexicographicMode=False,
+            lexicographicMode=lexicographic_mode,
             lookupMib=False,
         ).__aiter__()
         while True:
@@ -248,8 +249,9 @@ def walk_subtree(
     *,
     batch_size: int = 50,
     cancel_event: threading.Event | None = None,
+    walk_entire_mib: bool = False,
 ) -> SnmpWalkResult:
-    """Walk an OID subtree, reporting batches and honoring an optional cancel event."""
+    """Stream an OID walk; optionally continue past the starting subtree."""
     if batch_size < 1:
         raise ValueError("batch_size must be at least 1")
 
@@ -262,6 +264,7 @@ def walk_subtree(
             oid,
             batch_size,
             cancel_event,
+            lexicographic_mode=walk_entire_mib,
         ):
             if batch is None:
                 return SnmpWalkResult(count, aborted=True)

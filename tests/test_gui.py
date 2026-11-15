@@ -180,6 +180,57 @@ class OidNameHarness:
         self._nodes_by_oid = {oid: OidNode(oid, definitions=[definition])}
 
 
+class FakeContextTree:
+    def identify_row(self, _y: int) -> str:
+        return "node"
+
+    def selection_set(self, _iid: str) -> None:
+        pass
+
+    def focus(self, _iid: str) -> None:
+        pass
+
+    def selection(self) -> tuple[str, ...]:
+        return ("node",)
+
+
+class FakeContextMenu:
+    def __init__(self) -> None:
+        self.commands: list[dict[str, Any]] = []
+
+    def delete(self, _start: int, _end: str) -> None:
+        self.commands.clear()
+
+    def add_command(self, **options: Any) -> None:
+        self.commands.append(options)
+
+    def tk_popup(self, _x: int, _y: int) -> None:
+        pass
+
+
+class WalkContextMenuHarness:
+    _show_tree_context_menu = MibExplorerApp._show_tree_context_menu
+    _walk_selected_oid = MibExplorerApp._walk_selected_oid
+
+    def __init__(self) -> None:
+        self._tree = FakeContextTree()
+        self._tree_context_menu = FakeContextMenu()
+        self._oid_by_iid = {"node": (1, 3, 6)}
+        self._snmp_host_var = FakeVariable("agent.example")
+        self._snmp_port_var = FakeVariable("161")
+        self._snmp_community_var = FakeVariable("public")
+        self._opened: tuple[tuple[Any, ...], dict[str, Any]] | None = None
+
+    def _table_definition_for_iid(self, _iid: str) -> None:
+        return None
+
+    def _get_selected_subtree(self) -> None:
+        pass
+
+    def _open_snmp_results_tab(self, *args: Any, **kwargs: Any) -> None:
+        self._opened = (args, kwargs)
+
+
 class SnmpResultsPollingHarness:
     _poll_snmp_results = MibExplorerApp._poll_snmp_results
     _abort_snmp_request = MibExplorerApp._abort_snmp_request
@@ -296,6 +347,26 @@ class TreeControlTests(unittest.TestCase):
         app = OidNameHarness()
 
         self.assertEqual(app._oid_name_for_text(".1.3.6.1.99"), ".1.3.6.1.99")
+
+    def test_context_menu_walk_starts_at_selected_oid_and_runs_to_mib_end(self) -> None:
+        app = WalkContextMenuHarness()
+
+        result = app._show_tree_context_menu(
+            cast(Any, SimpleNamespace(y=20, x_root=100, y_root=200))
+        )
+
+        self.assertEqual(result, "break")
+        self.assertEqual(
+            [command["label"] for command in app._tree_context_menu.commands],
+            ["Get subtree", "Walk"],
+        )
+        walk_command = app._tree_context_menu.commands[1]
+        self.assertEqual(walk_command["state"], "normal")
+        walk_command["command"]()
+        self.assertEqual(
+            app._opened,
+            (("agent.example", 161, "public", (1, 3, 6)), {"walk_entire_mib": True}),
+        )
 
     def test_table_definition_is_recognized_but_table_row_is_not(self) -> None:
         app = TableDefinitionHarness()

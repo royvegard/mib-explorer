@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import unittest
+from unittest.mock import patch
 
 from mib_explorer.model import OidDefinition
 from mib_explorer.snmp import (
@@ -48,6 +49,39 @@ class SnmpTargetSettingsTests(unittest.TestCase):
         self.assertTrue(result.aborted)
         self.assertEqual(result.count, 0)
         self.assertEqual(batches, [])
+
+    def test_walk_can_continue_past_the_starting_subtree(self) -> None:
+        lexicographic_modes = []
+        expected = SnmpValue(".1.3.6.1", "Integer32", "1")
+
+        async def fake_batches(
+            _host: str,
+            _port: int,
+            _community: str,
+            _oid: tuple[int, ...],
+            _batch_size: int,
+            _cancel_event: threading.Event | None = None,
+            *,
+            lexicographic_mode: bool = False,
+        ):
+            lexicographic_modes.append(lexicographic_mode)
+            yield (expected,)
+
+        batches = []
+        with patch("mib_explorer.snmp._walk_subtree_batches", fake_batches):
+            result = walk_subtree(
+                "agent.example",
+                161,
+                "public",
+                (1, 3, 6),
+                batches.append,
+                walk_entire_mib=True,
+            )
+
+        self.assertEqual(lexicographic_modes, [True])
+        self.assertEqual(batches, [(expected,)])
+        self.assertEqual(result.count, 1)
+        self.assertFalse(result.aborted)
 
     def test_strips_host_and_parses_port(self) -> None:
         self.assertEqual(
